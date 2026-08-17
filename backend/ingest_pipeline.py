@@ -312,7 +312,7 @@ class IndicRAGIndexer:
     Orchestrates embedding generation and batch insertion into Qdrant vector database.
     """
 
-    def __init__(self, config: IngestConfig):
+    def __init__(self, config: IngestConfig, client=None):
         self.config = config
 
         try:
@@ -333,9 +333,12 @@ class IndicRAGIndexer:
         self.config.embedding_dim = len(probe_emb)
         logger.info(f"Model loaded in {(time.perf_counter() - t0):.2f}s | Vector Dimension: {self.config.embedding_dim}")
 
-        logger.info(f"Connecting to local Qdrant vector store at '{self.config.qdrant_path}'...")
-        os.makedirs(self.config.qdrant_path, exist_ok=True)
-        self.client = QdrantClient(path=self.config.qdrant_path)
+        if client is not None:
+            self.client = client
+        else:
+            logger.info(f"Connecting to local Qdrant vector store at '{self.config.qdrant_path}'...")
+            os.makedirs(self.config.qdrant_path, exist_ok=True)
+            self.client = QdrantClient(path=self.config.qdrant_path)
 
         # Setup chunking strategies
         self.chunkers: List[BaseChunker] = []

@@ -238,7 +238,9 @@ async def trigger_reindex(samples: int = 1000):
             sample_limit=samples,
             recreate_collection=True
         )
-        indexer = IndicRAGIndexer(cfg)
+        existing_client = state.retriever.client if state.retriever else None
+        indexer = IndicRAGIndexer(cfg, client=existing_client)
+        indexer.init_collection(recreate=True)
         return indexer.run_ingestion()
 
     loop = asyncio.get_event_loop()
