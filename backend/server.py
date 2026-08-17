@@ -221,8 +221,12 @@ async def health_check():
 
 @app.get("/api/admin/reindex")
 @app.post("/api/admin/reindex")
-async def trigger_reindex(samples: int = 1000):
-    """Admin endpoint to trigger automated indexing directly without file lock conflicts."""
+async def trigger_reindex(samples: int = 1000, recreate: bool = False):
+    """
+    Admin endpoint to index more samples live.
+    - recreate=false: Adds more vectors incrementally without dropping existing data.
+    - recreate=true: Drops existing collection and starts fresh.
+    """
     from ingest_pipeline import IngestConfig, IndicRAGIndexer
     import asyncio
 
@@ -239,22 +243,26 @@ async def trigger_reindex(samples: int = 1000):
         )
         existing_client = state.retriever.client if state.retriever else None
         indexer = IndicRAGIndexer(cfg, client=existing_client)
-        indexer.init_collection(recreate=True)
+        indexer.init_collection(recreate=recreate)
         return indexer.run_ingestion()
 
-    loop = asyncio.get_event_loop()
-    count = await loop.run_in_executor(None, run_indexer)
-    
-    # Reload retriever collection
-    if state.retriever:
-        state.retriever._verify_collection()
+    try:
+        loop = asyncio.get_event_loop()
+        count = await loop.run_in_executor(None, run_indexer)
+        
+        # Refresh retriever collection stats
+        if state.retriever:
+            state.retriever._verify_collection()
 
-    return {
-        "status": "success",
-        "message": f"Successfully indexed {count} vector points into {collection_name}.",
-        "model": embedding_model,
-        "sample_limit": samples
-    }
+        return {
+            "status": "success",
+            "message": f"Successfully indexed {count} vector points into '{collection_name}' (recreate={recreate}).",
+            "model": embedding_model,
+            "samples_processed": samples
+        }
+    except Exception as e:
+        logger.error(f"Reindex error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Reindexing failed: {str(e)}")
 
 
 @app.post("/api/text-query", response_model=QueryResponse)
