@@ -27,11 +27,13 @@ RUN pip install --no-cache-dir -r ./backend/requirements.txt
 # Copy Backend Code and Built Frontend Bundle
 COPY backend/ ./backend/
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+COPY entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh
 
 WORKDIR /app/backend
 
 # Expose port 3004
 EXPOSE 3004
 
-# Run FastAPI serving frontend and backend on port 3004
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "3004"]
+# Run automated entrypoint script
+ENTRYPOINT ["/bin/bash", "/app/entrypoint.sh"]
