@@ -5,13 +5,15 @@ echo "======================================================================"
 echo "PRODUCTION ENTRYPOINT: INDIC VOICE RAG"
 echo "======================================================================"
 
-# If collection does not exist or qdrant_data is empty, run ingestion automatically
-if [ ! -d "/app/backend/qdrant_data" ] || [ ! -f "/app/backend/qdrant_data/meta.json" ]; then
-    echo "==> No existing vector database found. Starting automated ingestion..."
-    python ingest_pipeline.py --model ${EMBEDDING_MODEL:-intfloat/multilingual-e5-large} --sample-limit 1000 --recreate-collection
-    echo "==> Ingestion completed successfully!"
+# Check if Qdrant collection directory exists with indexed segments
+COLLECTION_DIR="/app/backend/qdrant_data/collections/indic_rag_msmarco_hi"
+
+if [ ! -d "$COLLECTION_DIR" ]; then
+    echo "==> Vector database not indexed yet. Running automated ingestion..."
+    python /app/backend/ingest_pipeline.py --model "${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}" --sample-limit 1000 --recreate-collection
+    echo "==> Ingestion finished successfully!"
 else
-    echo "==> Existing vector database detected in qdrant_data."
+    echo "==> Vector collection 'indic_rag_msmarco_hi' detected. Starting server directly."
 fi
 
 echo "==> Starting FastAPI Voice RAG Server on port 3004..."
