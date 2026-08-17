@@ -57,7 +57,7 @@ class IngestConfig:
     sample_limit: int = 100  # Number of samples to ingest (0 for all)
     collection_name: str = "indic_rag_msmarco_hi"
     qdrant_path: str = "./qdrant_data"
-    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    embedding_model: str = "intfloat/multilingual-e5-large"
     embedding_dim: Optional[int] = None  # Auto-detected if None
     embedding_batch_size: int = 16
     upsert_batch_size: int = 32
@@ -640,7 +640,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        default="intfloat/multilingual-e5-large",
         help="FastEmbed embedding model name."
     )
     parser.add_argument(

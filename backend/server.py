@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
 
     # 1. Initialize Vector Retriever with In-Memory Caching
     qdrant_dir = os.getenv("QDRANT_PATH", "./qdrant_data")
-    embedding_model = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    embedding_model = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
     logger.info(f"Initializing IndicRetriever (Model: {embedding_model}, Path: '{qdrant_dir}')...")
     state.retriever = IndicRetriever(qdrant_path=qdrant_dir, embedding_model=embedding_model)
 

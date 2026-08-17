@@ -118,7 +118,7 @@ class IndicRetriever:
         self.collection_name = collection_name or os.getenv("QDRANT_COLLECTION", "indic_rag_msmarco_hi")
         self.embedding_model_name = embedding_model or os.getenv(
             "EMBEDDING_MODEL",
-            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+            "intfloat/multilingual-e5-large"
         )
 
         # In-Memory LRU Vector Embedding Cache (Sub-millisecond instant hit)
