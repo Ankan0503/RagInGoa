@@ -514,30 +514,17 @@ async def websocket_voice_rag(websocket: WebSocket):
                 )
             sources_block = "\n".join(sources_log_lines) if sources_log_lines else "  No sources retrieved."
 
+            # Clean, formatted log output
             answer_text = "".join(full_answer_parts)
+            sources_summary = " | ".join([f"#{i+1} [{s.score:.2f}, ID:{s.parent_id}]" for i, s in enumerate(retrieval_res.hits[:3])]) or "None"
 
+            logger.info(f"[RAG QUERY] \"{text_query}\" -> Answer: \"{answer_text}\"")
+            logger.info(f"[RAG SOURCES] Top Hits: {sources_summary}")
             logger.info(
-                f"\n" + "=" * 70 + "\n"
-                f"Query: \"{text_query}\"\n"
-                f"-" * 70 + "\n"
-                f"Answer: {answer_text}\n"
-                f"-" * 70 + "\n"
-                f"[Retrieved Evidence - Top Sources]:\n"
-                f"{sources_block}\n"
-                f"=" * 45 + "\n"
-                f"      LATENCY & PERFORMANCE ANALYTICS\n"
-                f"=" * 45 + "\n"
-                f"  * STT Latency (Sarvam)     : {final_metrics['stt_latency_ms'] or 0.0} ms\n"
-                f"  * Retrieval Latency        : {final_metrics['retrieval_latency_ms']} ms\n"
-                f"    - Embedding Time         : {final_metrics['embed_latency_ms']} ms\n"
-                f"    - Qdrant Search Time     : {final_metrics['search_latency_ms']} ms\n"
-                f"  * Time to First Token      : {final_metrics['ttft_ms']} ms\n"
-                f"  * First-Token Latency      : {final_metrics['first_token_latency_ms']} ms  <-- (Retrieval + TTFT)\n"
-                f"  * Total Generation Time    : {final_metrics['total_generation_time_ms']} ms\n"
-                f"  * Total Pipeline Time      : {final_metrics['total_pipeline_latency_ms']} ms\n"
-                f"  * Generation Speed         : {final_metrics['tokens_per_second']} tokens/sec ({final_metrics['total_tokens']} tokens)\n"
-                f"  * Target SLA Budget (<200ms): {'PASSED [OK]' if final_metrics['sla_passed'] else 'OVER BUDGET [WARNING]'}\n"
-                f"=" * 70
+                f"[LATENCY] STT: {final_metrics['stt_latency_ms'] or 0}ms | "
+                f"Retrieval: {final_metrics['retrieval_latency_ms']}ms (Embed: {final_metrics['embed_latency_ms']}ms, Qdrant: {final_metrics['search_latency_ms']}ms) | "
+                f"TTFT: {final_metrics['ttft_ms']}ms | First-Token: {final_metrics['first_token_latency_ms']}ms | "
+                f"Speed: {final_metrics['tokens_per_second']} tps | SLA: {'PASSED' if final_metrics['sla_passed'] else 'OVER_BUDGET'}"
             )
 
             await websocket.send_json({
