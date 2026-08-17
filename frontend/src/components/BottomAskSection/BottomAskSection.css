@@ -1,0 +1,185 @@
+.bottom-ask-section-wrapper {
+  position: relative;
+  width: 100%;
+  max-width: 660px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 16px;
+  user-select: none;
+  z-index: 10;
+}
+
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  width: 100%;
+  max-width: 625px;
+  justify-content: center;
+  justify-items: center;
+  z-index: 10;
+}
+
+.capability-card {
+  width: 100%;
+  max-width: 145px;
+  height: 76px;
+  background-color: #FEFEFC;
+  border: 1px solid #ECECE7;
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  box-shadow: 0 3px 12px rgba(38, 55, 45, 0.035);
+  transition: transform 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+  cursor: default;
+}
+
+.capability-card:hover {
+  transform: translateY(-1px);
+  background-color: #FCFDF9;
+  box-shadow: 0 4px 16px rgba(38, 55, 45, 0.065);
+}
+
+.capability-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #176B4F;
+  font-family: 'Inter', sans-serif;
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.capability-card-icon {
+  flex-shrink: 0;
+  color: #176B4F;
+}
+
+.capability-card-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+}
+
+/* Specific styling for MSMARCO-XI title to keep it single line */
+.capability-card-title.long-title {
+  font-size: 13px;
+}
+
+.capability-card-subtitle {
+  font-family: 'Inter', sans-serif;
+  font-weight: 400;
+  font-size: 11.5px;
+  color: #777D78;
+  margin-top: 4px;
+  margin-left: 24px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.2;
+}
+
+/* Decorations Styles */
+.coastal-decorations-container {
+  position: relative;
+  width: 100%;
+  height: 90px;
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding-bottom: 10px;
+  overflow: visible;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.coastal-waves {
+  position: absolute;
+  top: -45px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 650px;
+  height: 140px;
+  fill: none;
+  opacity: 0.55;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.coastal-seashell {
+  position: absolute;
+  left: 60px;
+  top: 30px;
+  width: 50px;
+  height: 50px;
+  z-index: 10;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.coastal-palm-leaf {
+  position: absolute;
+  right: -15px;
+  bottom: -30px;
+  width: 220px;
+  height: 190px;
+  z-index: 10;
+  opacity: 0.75;
+  pointer-events: none;
+  transform-origin: bottom right;
+  transition: transform 0.3s ease;
+}
+
+.built-in-goa {
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  color: #176B4F;
+  text-align: center;
+  z-index: 20;
+  pointer-events: auto;
+}
+
+.goa-heart {
+  color: #E55353;
+  margin-left: 2px;
+  margin-right: 2px;
+}
+
+/* Responsive Rules */
+@media (max-width: 1100px) {
+  .capability-card {
+    max-width: 135px;
+  }
+}
+
+@media (max-width: 850px) {
+  .capability-grid {
+    grid-template-columns: repeat(2, 1fr);
+    max-width: 320px;
+    gap: 12px;
+  }
+  
+  .capability-card {
+    max-width: 145px;
+  }
+  
+  .coastal-palm-leaf {
+    transform: scale(0.8);
+    right: -10px;
+    bottom: -15px;
+  }
+  
+  .coastal-seashell {
+    left: 20px;
+    top: 40px;
+    transform: scale(0.8);
+  }
+}

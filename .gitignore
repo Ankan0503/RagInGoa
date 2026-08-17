@@ -1,0 +1,15 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+
+__pycache__/
+qdrant_data/
+venv/
+phase1/
+phase2/

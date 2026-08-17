@@ -1,0 +1,6 @@
+{
+  "name": "RAG in GOA",
+  "description": "Voice-enabled Retrieval-Augmented Generation interface built for Goa.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
