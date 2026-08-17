@@ -24,6 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt ./backend/
 RUN pip install --no-cache-dir -r ./backend/requirements.txt
 
+# Pre-bake the embedding model into the image (Eliminates runtime downloads)
+RUN python -c "from fastembed import TextEmbedding; _ = list(TextEmbedding('intfloat/multilingual-e5-large').embed(['warmup']))"
+
 # Copy Backend Code and Built Frontend Bundle
 COPY backend/ ./backend/
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
