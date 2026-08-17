@@ -59,8 +59,8 @@ class IngestConfig:
     qdrant_path: str = "./qdrant_data"
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     embedding_dim: Optional[int] = None  # Auto-detected if None
-    embedding_batch_size: int = 128
-    upsert_batch_size: int = 256
+    embedding_batch_size: int = 16
+    upsert_batch_size: int = 32
     window_sentences: int = 2
     overlap_sentences: int = 1
     min_chunk_chars: int = 15
@@ -424,6 +424,8 @@ class IndicRAGIndexer:
             
             count = len(points)
             buffer.clear()
+            import gc
+            gc.collect()
             return count
 
         sample_count = 0
