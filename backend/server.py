@@ -235,8 +235,7 @@ async def trigger_reindex(samples: int = 1000):
             embedding_model=embedding_model,
             qdrant_path=qdrant_path,
             collection_name=collection_name,
-            sample_limit=samples,
-            recreate_collection=True
+            sample_limit=samples
         )
         existing_client = state.retriever.client if state.retriever else None
         indexer = IndicRAGIndexer(cfg, client=existing_client)
@@ -505,16 +504,40 @@ async def websocket_voice_rag(websocket: WebSocket):
                 "sla_passed": total_pipeline_ms < 200.0 or first_token_latency_ms < 200.0
             }
 
+            # Build Formatted Retrieved Evidence Log
+            sources_log_lines = []
+            for idx, s in enumerate(retrieval_res.hits[:3]):
+                preview = s.parent_text[:90].replace('\n', ' ')
+                sources_log_lines.append(
+                    f"  #{idx+1} [Score: {s.score:.4f} | Strategy: {s.strategy} | ID: {s.parent_id}]\n"
+                    f"     Context: \"{preview}...\""
+                )
+            sources_block = "\n".join(sources_log_lines) if sources_log_lines else "  No sources retrieved."
+
+            answer_text = "".join(full_answer_parts)
+
             logger.info(
-                f"\n[LATENCY TELEMETRY] Query: '{text_query}'\n"
-                f"  ├─ STT Latency (Sarvam)     : {final_metrics['stt_latency_ms'] or 0.0} ms\n"
-                f"  ├─ Vector Retrieval (Qdrant): {final_metrics['retrieval_latency_ms']} ms (Embed: {final_metrics['embed_latency_ms']}ms, Search: {final_metrics['search_latency_ms']}ms)\n"
-                f"  ├─ Time to First Token (TTFT): {final_metrics['ttft_ms']} ms\n"
-                f"  ├─ First-Token Latency (RAG) : {final_metrics['first_token_latency_ms']} ms\n"
-                f"  ├─ Total Generation Time     : {final_metrics['total_generation_time_ms']} ms\n"
-                f"  ├─ Total Pipeline Latency    : {final_metrics['total_pipeline_latency_ms']} ms\n"
-                f"  ├─ Throughput (TPS)          : {final_metrics['tokens_per_second']} tokens/sec ({final_metrics['total_tokens']} tokens)\n"
-                f"  └─ <200ms Target SLA Budget  : {'PASSED [OK]' if final_metrics['sla_passed'] else 'EXCEEDED'}"
+                f"\n" + "=" * 70 + "\n"
+                f"Query: \"{text_query}\"\n"
+                f"-" * 70 + "\n"
+                f"Answer: {answer_text}\n"
+                f"-" * 70 + "\n"
+                f"[Retrieved Evidence - Top Sources]:\n"
+                f"{sources_block}\n"
+                f"=" * 45 + "\n"
+                f"      LATENCY & PERFORMANCE ANALYTICS\n"
+                f"=" * 45 + "\n"
+                f"  * STT Latency (Sarvam)     : {final_metrics['stt_latency_ms'] or 0.0} ms\n"
+                f"  * Retrieval Latency        : {final_metrics['retrieval_latency_ms']} ms\n"
+                f"    - Embedding Time         : {final_metrics['embed_latency_ms']} ms\n"
+                f"    - Qdrant Search Time     : {final_metrics['search_latency_ms']} ms\n"
+                f"  * Time to First Token      : {final_metrics['ttft_ms']} ms\n"
+                f"  * First-Token Latency      : {final_metrics['first_token_latency_ms']} ms  <-- (Retrieval + TTFT)\n"
+                f"  * Total Generation Time    : {final_metrics['total_generation_time_ms']} ms\n"
+                f"  * Total Pipeline Time      : {final_metrics['total_pipeline_latency_ms']} ms\n"
+                f"  * Generation Speed         : {final_metrics['tokens_per_second']} tokens/sec ({final_metrics['total_tokens']} tokens)\n"
+                f"  * Target SLA Budget (<200ms): {'PASSED [OK]' if final_metrics['sla_passed'] else 'OVER BUDGET [WARNING]'}\n"
+                f"=" * 70
             )
 
             await websocket.send_json({
