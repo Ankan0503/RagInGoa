@@ -219,6 +219,43 @@ async def health_check():
     }
 
 
+@app.get("/api/admin/reindex")
+@app.post("/api/admin/reindex")
+async def trigger_reindex(samples: int = 1000):
+    """Admin endpoint to trigger automated indexing directly without file lock conflicts."""
+    from ingest_pipeline import IngestConfig, IndicRAGIndexer
+    import asyncio
+
+    embedding_model = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+    qdrant_path = os.getenv("QDRANT_PATH", "./qdrant_data")
+    collection_name = os.getenv("QDRANT_COLLECTION", "indic_rag_msmarco_hi")
+
+    def run_indexer():
+        cfg = IngestConfig(
+            embedding_model=embedding_model,
+            qdrant_path=qdrant_path,
+            collection_name=collection_name,
+            sample_limit=samples,
+            recreate_collection=True
+        )
+        indexer = IndicRAGIndexer(cfg)
+        return indexer.run_ingestion()
+
+    loop = asyncio.get_event_loop()
+    count = await loop.run_in_executor(None, run_indexer)
+    
+    # Reload retriever collection
+    if state.retriever:
+        state.retriever._verify_collection()
+
+    return {
+        "status": "success",
+        "message": f"Successfully indexed {count} vector points into {collection_name}.",
+        "model": embedding_model,
+        "sample_limit": samples
+    }
+
+
 @app.post("/api/text-query", response_model=QueryResponse)
 async def process_text_query(req: TextQueryRequest):
     """
