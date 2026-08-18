@@ -60,32 +60,14 @@ export function RagProvider({ children }: { children: ReactNode }) {
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [statusStage, setStatusStage] = useState<PipelineStage>("idle");
-  const [query, setQuery] = useState<string>("कॉर्पोरेशन क्या है?");
-  const [answer, setAnswer] = useState<string>(
-    "एक कॉर्पोरेशन एक निगम या लोगों का समूह है जो एक एकल इकाई (कानूनी रूप से एक व्यक्ति) के रूप में कार्य करने के लिए अधिकृत है और कानून में इस तरह से मान्यता प्राप्त है।"
-  );
-  const [sources, setSources] = useState<SourceHit[]>([
-    {
-      score: 0.6809,
-      strategy: "sliding_window",
-      parent_id: "1102432_p5",
-      parent_text: "मैकडॉनल्ड कॉर्पोरेशन दुनिया के सबसे पहचानने योग्य निगमों में से एक है। एक निगम एक कंपनी या लोगों का समूह है जो एक एकल इकाई (कानूनी रूप से एक व्यक्ति) के रूप में कार्य करने के लिए अधिकृत है और कानून में इस तरह से मान्यता प्राप्त है।",
-      child_text: "एक निगम एक कंपनी या लोगों का समूह है..."
-    }
-  ]);
-  const [metrics, setMetrics] = useState<LatencyMetrics | null>({
-    stt_latency_ms: 110.0,
-    retrieval_latency_ms: 6.4,
-    embed_latency_ms: 5.1,
-    search_latency_ms: 1.3,
-    ttft_ms: 65.0,
-    first_token_latency_ms: 181.4,
-    total_generation_time_ms: 310.0,
-    total_pipeline_latency_ms: 426.4,
-    tokens_per_second: 215.0,
-    total_tokens: 68,
-    sla_passed: true
-  });
+  // Seeded empty. These were previously populated with a hardcoded answer, a
+  // fabricated source passage and a full set of plausible latency numbers, so a
+  // freshly loaded page displayed "181.4ms" and a citation before anything had
+  // run. Measurements must only ever come from a real request.
+  const [query, setQuery] = useState<string>("");
+  const [answer, setAnswer] = useState<string>("");
+  const [sources, setSources] = useState<SourceHit[]>([]);
+  const [metrics, setMetrics] = useState<LatencyMetrics | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<string>("Best Match");
   const [error, setError] = useState<string | null>(null);
 
