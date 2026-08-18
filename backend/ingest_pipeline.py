@@ -285,21 +285,34 @@ class IndicDatasetLoader:
         return cached_file
 
     @classmethod
-    def iterate_samples(cls, split: str = "validation", max_samples: int = 100) -> Generator[Dict[str, Any], None, None]:
-        """Streams dataset rows efficiently in batches from parquet file."""
+    def iterate_samples(cls, split: str = "validation", max_samples: int = 100,
+                        batch_size: int = 1000) -> Generator[Dict[str, Any], None, None]:
+        """
+        Streams dataset rows in fixed-size batches.
+
+        The previous implementation called read_row_group(0), and hinval.parquet
+        stores all 97,941 rows in a SINGLE row group -- so it materialised the
+        entire 441MB file (well over 1GB once expanded into pandas) no matter how
+        small --sample-limit was. That was the out-of-memory crash. iter_batches
+        holds `batch_size` rows at a time and nothing more.
+        """
         import pyarrow.parquet as pq
 
         parquet_path = cls.get_parquet_path(split=split)
         pf = pq.ParquetFile(parquet_path)
-        logger.info(f"Parquet opened: {pf.metadata.num_rows} total dataset rows, {pf.num_row_groups} row groups.")
+        logger.info(f"Parquet opened: {pf.metadata.num_rows:,} rows in {pf.num_row_groups} "
+                    f"row group(s); streaming {batch_size} rows at a time.")
 
-        yielded_count = 0
-        for rg_idx in range(pf.num_row_groups):
-            df_rg = pf.read_row_group(rg_idx).to_pandas()
-            for _, row in df_rg.iterrows():
-                yield row.to_dict()
-                yielded_count += 1
-                if 0 < max_samples <= yielded_count:
+        # Only the columns actually used -- avoids decoding English_passages and
+        # the meta struct for every row.
+        columns = ["query_id", "query", "query_type", "Answer", "passages"]
+
+        yielded = 0
+        for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
+            for row in batch.to_pylist():
+                yield row
+                yielded += 1
+                if 0 < max_samples <= yielded:
                     return
 
 
