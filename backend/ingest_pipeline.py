@@ -337,6 +337,12 @@ class IndicRAGIndexer:
 
         self._models = models
 
+        # Derived from the model name so ingestion and retrieval can never drift
+        # apart. See retriever.prefixes_for_model for why this matters.
+        from retriever import prefixes_for_model
+        self.query_prefix, self.passage_prefix = prefixes_for_model(self.config.embedding_model)
+        logger.info(f"Embedding prefixes: query={self.query_prefix!r} passage={self.passage_prefix!r}")
+
         logger.info(f"Loading FastEmbed model '{self.config.embedding_model}'...")
         t0 = time.perf_counter()
         self.embed_model = TextEmbedding(model_name=self.config.embedding_model)
@@ -416,7 +422,10 @@ class IndicRAGIndexer:
             if not buffer:
                 return 0
             
-            texts = [c.chunk_text for c in buffer]
+            # Prefix is model-dependent, never unconditional: E5 is trained with
+            # "query: "/"passage: " markers, MiniLM and BGE are not. Applying E5
+            # prefixes to a MiniLM index degrades every subsequent search.
+            texts = [f"{self.passage_prefix}{c.chunk_text}" for c in buffer]
             embeddings = list(self.embed_model.embed(texts, batch_size=self.config.embedding_batch_size))
             
             points = []
@@ -540,8 +549,8 @@ def benchmark_retrieval(
         for it in range(num_iterations):
             t0 = time.perf_counter()
 
-            # 1. Generate query vector
-            query_emb = list(indexer.embed_model.embed([query]))[0].tolist()
+            # 1. Generate query vector (prefix is model-derived, see __init__)
+            query_emb = list(indexer.embed_model.embed([f"{indexer.query_prefix}{query}"]))[0].tolist()
 
             # 2. Query Qdrant vector store
             search_results = indexer.client.query_points(
