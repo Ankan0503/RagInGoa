@@ -98,7 +98,10 @@ services:
         condition: service_healthy        # never start against a half-open index
 
     ports:
-      - "3004:3004"
+      # HOST_PORT lets the new stack run alongside an existing deployment that
+      # already binds 3004, so it can be verified before the tunnel is switched
+      # over and the old service removed. Container port stays 3004.
+      - "${HOST_PORT:-3004}:3004"
 
     # Application config and API keys live in backend/.env, which is gitignored.
     # Compose itself only substitutes ${...} from the ROOT .env (see .env.example),
