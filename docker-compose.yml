@@ -138,11 +138,23 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
 
     volumes:
-      # parents.sqlite and index_manifest.json ship next to the snapshot. Mounted
-      # read-only rather than baked in, so the index can be swapped without an
-      # image rebuild.
-      - ./backend/parents.sqlite:/app/backend/parents.sqlite:ro
-      - ./backend/index_manifest.json:/app/backend/index_manifest.json:ro
+      # parents.sqlite (281MB) and index_manifest.json are gitignored, so they are
+      # NOT in a git clone — they ship alongside the Qdrant snapshot and are placed
+      # on the host out of band.
+      #
+      # INDEX_DIR makes the source location configurable because the two
+      # deployment styles need different paths:
+      #   plain docker compose : ./backend        (files sit next to the code)
+      #   Dokploy             : ../files          (Dokploy's persistent bind-mount
+      #                                            dir; the git clone is REPLACED on
+      #                                            every deploy, and Dokploy warns
+      #                                            that absolute host paths are
+      #                                            cleaned up during deployment)
+      #
+      # Confirm the resolved host path in Dokploy's UI under Advanced > Volumes —
+      # the docs do not state it and it must not be guessed.
+      - ${INDEX_DIR:-./backend}/parents.sqlite:/app/backend/parents.sqlite:ro
+      - ${INDEX_DIR:-./backend}/index_manifest.json:/app/backend/index_manifest.json:ro
 
     healthcheck:
       # /health returns 503 when the index is unusable, so an unhealthy container
