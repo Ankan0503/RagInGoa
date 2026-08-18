@@ -88,11 +88,16 @@ GUARDRAIL_SUITE: List[Tuple[str, str]] = [
 ]
 
 
-def load_dataset_queries(n: int, seed: int = 42) -> List[Dict[str, str]]:
+def load_dataset_queries(n: int, seed: int = 42,
+                         allow_download: bool = False) -> List[Dict[str, str]]:
     """
     Prefer parents.sqlite (written by build_index_gpu.py) because those queries
-    are guaranteed to have indexed passages. Fall back to the parquet, then to a
-    small builtin set.
+    are guaranteed to have indexed passages.
+
+    The parquet fallback is OPT-IN. On a deployed server parents.sqlite is always
+    present, so reaching the fallback means the mount is broken — and silently
+    pulling a 441MB dataset onto a 2 OCPU VM to paper over that is the wrong
+    behaviour. Without --allow-dataset-download this fails loudly instead.
     """
     db = os.path.join(BASE, "parents.sqlite")
     if os.path.exists(db):
@@ -110,7 +115,20 @@ def load_dataset_queries(n: int, seed: int = 42) -> List[Dict[str, str]]:
             return [{"query": r["query"], "gold": r["gold_answer"],
                      "type": r["query_type"] or "UNKNOWN"} for r in rows]
 
+    if not allow_download:
+        sys.exit(
+            f"\nNo usable queries in {db}\n\n"
+            f"On a deployed server parents.sqlite is mounted next to the code, so\n"
+            f"this means the file is missing, empty, or the bind mount resolved to a\n"
+            f"directory instead of a file. Check it:\n\n"
+            f"    ls -la {db}\n\n"
+            f"Refusing to fall back to downloading the 441MB parquet — that would\n"
+            f"hide the real problem and hammer the VM. Pass --allow-dataset-download\n"
+            f"if you genuinely want the dataset fetched (local dev only).\n"
+        )
+
     try:
+        print("Downloading the MSMARCO-XI parquet (441MB) — --allow-dataset-download was set")
         import pyarrow.parquet as pq
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(repo_id="ai4bharat/MSMARCO-XI",
@@ -551,6 +569,10 @@ def main():
     ap.add_argument("--timeout", type=float, default=30.0,
                     help="Per-request timeout in seconds. Lower it to fail fast on "
                          "a slow model instead of stalling silently.")
+    ap.add_argument("--allow-dataset-download", action="store_true",
+                    help="Permit downloading the 441MB MSMARCO-XI parquet when "
+                         "parents.sqlite is unusable. Off by default so a broken "
+                         "mount fails loudly instead of silently re-downloading.")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--provider", type=str, default=None,
                     help="Override the server's LLM backend for this run (groq|sarvam)")
@@ -565,7 +587,8 @@ def main():
         sys.exit("--compare needs --server: the LLM is called by the server, not by this script.")
 
     random.seed(args.seed)
-    queries = load_dataset_queries(args.num_queries, seed=args.seed)
+    queries = load_dataset_queries(args.num_queries, seed=args.seed,
+                                   allow_download=args.allow_dataset_download)
 
     # --- A/B mode ----------------------------------------------------------
     if args.compare:

@@ -20,7 +20,9 @@ requests>=2.31.0
 # --- ingestion / benchmarking (not needed to serve a prebuilt index) ---
 pyarrow>=15.0.0           # used directly by ingest_pipeline + benchmark
 huggingface_hub>=0.23.0
-datasets>=2.18.0
+# 'datasets' removed: nothing imports it. hf_hub_download (huggingface_hub) and
+# pyarrow cover every dataset access, and datasets pulls a large transitive tree
+# into an image that should never touch the corpus at runtime.
 tqdm>=4.66.0
 
 # --- index building on GPU (Colab/Kaggle only, see build_index_gpu.py) ---
