@@ -10,6 +10,29 @@ coverage/
 
 __pycache__/
 qdrant_data/
+qdrant_storage/
+*.sqlite
+*.sqlite3
+*.zip
+*.parquet
 venv/
 phase1/
 phase2/
+# --- index build artifacts (ship alongside the snapshot, never via git) ---
+*.sqlite-wal
+*.sqlite-shm
+index_manifest.json
+snapshots/
+*.snapshot
+qdrant_bin/
+*.pre-migration.bak
+
+# --- benchmark / calibration output ---
+before.json
+after.json
+after-tuning.json
+compare.json
+groq.json
+sarvam.json
+calib.json
+results.json
