@@ -1,0 +1,23 @@
+# Secrets are supplied at runtime by the platform, never baked into the image.
+**/.env
+**/.env.*
+!**/.env.example
+
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+venv/
+.venv/
+
+frontend/node_modules/
+frontend/dist/
+
+.git/
+.gitignore
+*.md
+phase1/
+phase2/
+
+# NOTE: backend/qdrant_data, backend/parents.sqlite and backend/index_manifest.json
+# are deliberately NOT ignored — the Dockerfile copies them when present so the
+# image ships with a working index.

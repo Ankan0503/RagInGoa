@@ -1,0 +1,167 @@
+# ==============================================================================
+# Indic Voice RAG — production stack (Oracle VM: 2 OCPU / 12 GB / 100 GB disk)
+# ==============================================================================
+#
+# WHY TWO SERVICES
+# ----------------
+# The backend previously opened the index with QdrantClient(path=...), i.e.
+# qdrant-client's local file mode. Measured on the real 680,446-vector index:
+#
+#     retrieval p50 = 11,411 ms      p100 = 26,744 ms
+#     startup       = 75 minutes
+#
+# Local mode does brute-force NumPy search, ignores hnsw_config and
+# quantization_config entirely, holds every vector in RAM, and allows only one
+# process. A real Qdrant server builds an HNSW index, honours int8 quantization,
+# memory-maps vectors from disk, and serves many clients.
+#
+# USAGE
+# -----
+#   cp .env.example backend/.env      # then fill in the keys
+#   docker compose up -d
+#   docker compose logs -f backend
+#
+# Restore the index snapshot built by backend/build_index_gpu.py:
+#   curl -X POST "http://localhost:6333/collections/indic_rag_msmarco_hi/snapshots/upload?priority=snapshot" \
+#        -H "api-key: $QDRANT_API_KEY" -F "snapshot=@/path/to/your.snapshot"
+
+name: indic-voice-rag
+
+services:
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4          # MUST match BuildConfig.qdrant_version
+    container_name: rag-qdrant
+    restart: unless-stopped
+
+    # NOT published to 0.0.0.0. Qdrant has no auth by default and a public
+    # instance is a full read/write database open to the internet. The backend
+    # reaches it over the internal compose network; the host binding below is
+    # loopback-only, for SSH-tunnelled debugging and for running benchmark.py
+    # on the VM itself.
+    ports:
+      - "127.0.0.1:6333:6333"             # HTTP / dashboard
+      - "127.0.0.1:6334:6334"             # gRPC
+
+    volumes:
+      - qdrant_storage:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
+
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
+      QDRANT__LOG_LEVEL: INFO
+
+      # 2 OCPU total and the backend needs one. Letting Qdrant spawn a thread per
+      # core starves the encoder and makes embed_query slower than the search it
+      # was meant to speed up.
+      QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS: 2
+      QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS: 1
+
+      # Force segments above 32 MB to be memory-mapped instead of RAM-resident.
+      # This is what bounds memory as the corpus grows: only the int8 quantized
+      # copies stay hot, originals are paged in from disk on demand.
+      QDRANT__STORAGE__OPTIMIZERS__MEMMAP_THRESHOLD_KB: 32768
+      QDRANT__STORAGE__OPTIMIZERS__INDEXING_THRESHOLD_KB: 20000
+
+      QDRANT__SERVICE__ENABLE_TLS: "false"   # loopback + internal network only
+      QDRANT__TELEMETRY_DISABLED: "true"
+
+    healthcheck:
+      # /readyz reports ready only once collections are loaded, which is what
+      # depends_on must actually wait for.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s                  # large collections take time to open
+
+    deploy:
+      resources:
+        limits:
+          memory: 7G                      # of 12G; leaves room for backend + OS
+        reservations:
+          memory: 1G
+
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-backend
+    restart: unless-stopped
+
+    depends_on:
+      qdrant:
+        condition: service_healthy        # never start against a half-open index
+
+    ports:
+      - "3004:3004"
+
+    # Application config and API keys live in backend/.env, which is gitignored.
+    # Compose itself only substitutes ${...} from the ROOT .env (see .env.example),
+    # so the two files serve different purposes: root .env parameterises this
+    # compose file, backend/.env configures the app.
+    env_file:
+      - ./backend/.env
+
+    environment:
+      # These override anything in env_file. Transport is pinned here because the
+      # manifest records which transport built the index, and retriever.py raises
+      # IndexUnavailableError on a mismatch — it cannot silently fall back.
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
+      QDRANT_PREFER_GRPC: "true"
+      QDRANT_TIMEOUT_S: "10"
+      HNSW_EF: "128"
+
+      PORT: "3004"
+      PYTHONUNBUFFERED: "1"
+
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.1-8b-instant}
+      SARVAM_API_KEY: ${SARVAM_API_KEY:-}
+      SARVAM_LLM_MODEL: ${SARVAM_LLM_MODEL:-sarvam-105b-conversations}
+      SARVAM_REASONING_EFFORT: ${SARVAM_REASONING_EFFORT:-none}
+      SARVAM_MODEL: ${SARVAM_MODEL:-saarika:v2.5}
+
+      MIN_RETRIEVAL_SCORE: ${MIN_RETRIEVAL_SCORE:-0.80}
+      MIN_GROUNDING_OVERLAP: ${MIN_GROUNDING_OVERLAP:-0.45}
+      MAX_TOKENS: ${MAX_TOKENS:-48}
+      LLM_ATTEMPTS: ${LLM_ATTEMPTS:-3}
+      LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-6.0}
+
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+
+    volumes:
+      # parents.sqlite and index_manifest.json ship next to the snapshot. Mounted
+      # read-only rather than baked in, so the index can be swapped without an
+      # image rebuild.
+      - ./backend/parents.sqlite:/app/backend/parents.sqlite:ro
+      - ./backend/index_manifest.json:/app/backend/index_manifest.json:ro
+
+    healthcheck:
+      # /health returns 503 when the index is unusable, so an unhealthy container
+      # is a real signal rather than "process is alive".
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3004/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  qdrant_storage:
+  qdrant_snapshots:
