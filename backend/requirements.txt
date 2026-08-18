@@ -1,14 +1,28 @@
-datasets>=2.18.0
-fastembed>=0.3.0
-qdrant-client>=1.8.0
-tqdm>=4.66.0
-pydantic>=2.0.0
-python-dotenv>=1.0.0
-numpy>=1.24.0
-requests>=2.31.0
-groq>=0.9.0
+# --- serving (what the Docker image installs) ---
 fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
-websockets>=12.0
 python-multipart>=0.0.9
+websockets>=12.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# retrieval
+fastembed>=0.4.0          # >=0.4 required for TextEmbedding.add_custom_model
+qdrant-client>=1.8.0
+numpy>=1.24.0
+
+# external services
+# groq SDK no longer needed: llm.py talks to Groq and Sarvam
+# through their shared OpenAI-compatible API using httpx.
 httpx>=0.27.0
+requests>=2.31.0
+
+# --- ingestion / benchmarking (not needed to serve a prebuilt index) ---
+pyarrow>=15.0.0           # used directly by ingest_pipeline + benchmark
+huggingface_hub>=0.23.0
+datasets>=2.18.0
+tqdm>=4.66.0
+
+# --- index building on GPU (Colab/Kaggle only, see build_index_gpu.py) ---
+# sentence-transformers>=3.0.0
+# torch
