@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Mic, BarChart2, Info } from "lucide-react";
+import { Mic, BarChart2, Info, X } from "lucide-react";
 
 // Types for Navigation Items
 interface NavItem {
@@ -11,7 +11,14 @@ interface NavItem {
 // Sidebar Image constant - can be replaced with real AVIF/PNG by user
 const SIDEBAR_IMAGE = "/assets/rag_photo.avif";
 
-export default function LeftSidebar() {
+interface LeftSidebarProps {
+  // Both unused at lg+ -- the sidebar is always visible there, exactly as
+  // before this component ever took props.
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export default function LeftSidebar({ isOpen, onClose }: LeftSidebarProps) {
   const [activeId, setActiveId] = useState<string>("ask");
 
   const navItems: NavItem[] = [
@@ -35,8 +42,23 @@ export default function LeftSidebar() {
   return (
     <aside
       id="left-sidebar"
-      className="relative flex flex-col w-[250px] min-w-[250px] max-w-[265px] h-full bg-[#fcfbf6] border-r border-[var(--border)] overflow-hidden select-none"
+      className={`
+        fixed inset-y-0 z-50 transition-[left] duration-300 ease-in-out
+        ${isOpen ? "left-0" : "left-[-300px]"}
+        lg:left-0 lg:relative lg:inset-auto lg:z-auto lg:transition-none
+        flex flex-col w-[250px] min-w-[250px] max-w-[265px] h-full bg-[#fcfbf6] border-r border-[var(--border)] overflow-hidden select-none
+      `}
     >
+      {/* Mobile-only close button -- topbar's hamburger opens, this closes.
+          Hidden at lg+ where the sidebar is always visible, no close needed. */}
+      <button
+        onClick={onClose}
+        aria-label="Close menu"
+        className="lg:hidden absolute top-3 right-3 z-20 w-8 h-8 flex items-center justify-center rounded-[8px] text-[#1C2420] hover:bg-[#F3F2ED] outline-none"
+      >
+        <X size={20} strokeWidth={1.8} />
+      </button>
+
       {/* Brand Section - Section A */}
       <div
         id="sidebar-brand-container"
@@ -172,7 +194,10 @@ export default function LeftSidebar() {
             <button
               key={item.id}
               id={`nav-item-${item.id}`}
-              onClick={() => setActiveId(item.id)}
+              onClick={() => {
+                setActiveId(item.id);
+                onClose();
+              }}
               className={`
                 group flex items-center w-[200px] h-[52px] px-4 rounded-[12px] transition-all duration-200 ease-in-out cursor-pointer text-left outline-none
                 ${isActive

@@ -81,7 +81,7 @@ export default function AnswerPanel() {
   return (
     <div
       id="right-answer-panel"
-      className="w-full max-w-[380px] lg:w-[380px] h-auto shrink-0 bg-[#FFFFFF] border border-[#EAE8E2] rounded-[20px] p-5 flex flex-col justify-start z-10 select-none font-sans self-center lg:self-start mt-[16px] lg:mt-[16px] mb-[16px] mx-auto lg:mx-0 lg:mr-[32px] lg:ml-[12px]"
+      className="w-[calc(100%-32px)] sm:w-full max-w-[380px] lg:w-[380px] h-auto shrink-0 bg-[#FFFFFF] border border-[#EAE8E2] rounded-[20px] p-4 sm:p-5 flex flex-col justify-start z-10 select-none font-sans self-center lg:self-start mt-[16px] lg:mt-[16px] mb-[16px] mx-auto lg:mx-0 lg:mr-[32px] lg:ml-[12px]"
       style={{
         boxShadow: "0 8px 28px rgba(35, 54, 44, 0.055)"
       }}

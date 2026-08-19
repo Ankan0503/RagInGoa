@@ -183,3 +183,17 @@
     transform: scale(0.8);
   }
 }
+
+/* Extra margin on the narrowest phones (~320-400px) so the 2-col grid never
+   presses against the shell edge. */
+@media (max-width: 400px) {
+  .capability-grid {
+    max-width: 280px;
+    gap: 10px;
+  }
+
+  .capability-card {
+    max-width: 130px;
+    height: 70px;
+  }
+}

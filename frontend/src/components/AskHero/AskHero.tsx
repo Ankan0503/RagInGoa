@@ -25,7 +25,7 @@ export function AudioWaveform({ side, isAnimating }: AudioWaveformProps) {
 
   return (
     <div
-      className={`w-[145px] h-[45px] flex items-center ${side === "left" ? "justify-end" : "justify-start"
+      className={`w-[38px] sm:w-[90px] lg:w-[145px] h-[45px] flex items-center ${side === "left" ? "justify-end" : "justify-start"
         } pointer-events-none`}
       aria-hidden="true"
     >
@@ -120,7 +120,7 @@ export default function AskHero() {
 
         {/* Headline block */}
         <div className="relative text-center w-full">
-          <h1 className="font-serif font-semibold text-[44px] sm:text-[48px] md:text-[52px] text-[#151917] leading-[1.02] tracking-[-0.8px] relative inline-block select-none">
+          <h1 className="font-serif font-semibold text-[32px] sm:text-[40px] md:text-[48px] lg:text-[52px] text-[#151917] leading-[1.02] tracking-[-0.8px] relative inline-block select-none">
             <span className="relative inline-block">
               Ask anything.
               {/* Elegant orange annotated rays mark */}
@@ -151,7 +151,7 @@ export default function AskHero() {
           <div className="flex justify-center mt-3 h-[20px]">
             <svg
               viewBox="0 0 300 20"
-              className="w-[250px] md:w-[280px] fill-none stroke-[#C7DCD2] opacity-75"
+              className="w-[170px] sm:w-[220px] md:w-[250px] lg:w-[280px] fill-none stroke-[#C7DCD2] opacity-75"
               strokeWidth="3.5"
               strokeLinecap="round"
               aria-hidden="true"
@@ -168,7 +168,7 @@ export default function AskHero() {
 
         {/* Voice Interaction Card - centered, 640px width, 335px height */}
         <div
-          className="w-full max-w-[640px] h-[335px] bg-[#FFFFFF] rounded-[20px] border border-[#F0EFEA] flex flex-col items-center justify-between py-[32px] px-6 mt-[12px] z-20 transition-all duration-300 hover:shadow-lg"
+          className="w-full max-w-[640px] h-auto min-h-[280px] lg:h-[335px] bg-[#FFFFFF] rounded-[20px] border border-[#F0EFEA] flex flex-col items-center justify-between py-[24px] lg:py-[32px] px-4 sm:px-6 mt-[12px] z-20 transition-all duration-300 hover:shadow-lg"
           style={{
             boxShadow: "0 10px 30px rgba(35, 54, 44, 0.05)",
           }}
@@ -179,31 +179,31 @@ export default function AskHero() {
           </h2>
 
           {/* Microphone and Symmetrical Waveforms Group */}
-          <div className="flex items-center justify-center w-full gap-2 sm:gap-4 my-auto">
+          <div className="flex items-center justify-center w-full gap-1 sm:gap-3 lg:gap-4 my-auto">
 
             {/* Left waveform illustration */}
             <AudioWaveform side="left" isAnimating={isListening || isProcessing} />
 
             {/* Spherically layered microphone trigger */}
-            <div className="relative flex items-center justify-center w-[170px] h-[170px] shrink-0">
+            <div className="relative flex items-center justify-center w-[104px] h-[104px] sm:w-[140px] sm:h-[140px] lg:w-[170px] lg:h-[170px] shrink-0">
 
-              {/* Outer light translucent ring (170px) */}
+              {/* Outer light translucent ring (170px at lg+, scaled below) */}
               <div className="absolute inset-0 rounded-full bg-[#F0F5F0] opacity-75 animate-pulse-subtle" />
 
-              {/* Middle ring (140px) */}
-              <div className="absolute w-[140px] h-[140px] rounded-full bg-[#DCEBE2] flex items-center justify-center">
+              {/* Middle ring (140px at lg+, scaled below) */}
+              <div className="absolute w-[86px] h-[86px] sm:w-[115px] sm:h-[115px] lg:w-[140px] lg:h-[140px] rounded-full bg-[#DCEBE2] flex items-center justify-center">
 
-                {/* Inner button (102px) */}
+                {/* Inner button (102px at lg+, scaled below) */}
                 <button
                   onClick={handleMicClick}
                   aria-label="Speak your question"
-                  className={`w-[102px] h-[102px] rounded-full flex items-center justify-center text-white cursor-pointer transition-all duration-300 hover:scale-[1.03] active:scale-[0.97] outline-none border-none group relative ${isListening ? "bg-[#14694F]" : "bg-[#176B4F] hover:bg-[#14694F]"
+                  className={`w-[64px] h-[64px] sm:w-[85px] sm:h-[85px] lg:w-[102px] lg:h-[102px] rounded-full flex items-center justify-center text-white cursor-pointer transition-all duration-300 hover:scale-[1.03] active:scale-[0.97] outline-none border-none group relative ${isListening ? "bg-[#14694F]" : "bg-[#176B4F] hover:bg-[#14694F]"
                     }`}
                   style={{
                     boxShadow: "0 5px 12px rgba(23, 107, 79, 0.15)",
                   }}
                 >
-                  <Mic className="w-[44px] h-[44px] stroke-[2] transition-transform duration-300 group-hover:rotate-2" />
+                  <Mic className="w-[28px] h-[28px] sm:w-[36px] sm:h-[36px] lg:w-[44px] lg:h-[44px] stroke-[2] transition-transform duration-300 group-hover:rotate-2" />
 
                   {/* Ping border animation when listening */}
                   {isListening && (
