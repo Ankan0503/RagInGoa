@@ -129,7 +129,13 @@ services:
       SARVAM_REASONING_EFFORT: ${SARVAM_REASONING_EFFORT:-none}
       SARVAM_MODEL: ${SARVAM_MODEL:-saarika:v2.5}
 
-      MIN_RETRIEVAL_SCORE: ${MIN_RETRIEVAL_SCORE:-0.80}
+      # 0.80 was the placeholder before the index existed to calibrate against.
+      # calibrate_threshold.py against the live 680k-vector index (2026-08-19)
+      # found real-query and out-of-domain scores overlap heavily (E5 cosine is
+      # compressed into a narrow high band), and recommended 0.850 as the
+      # coverage-first value: answers 95.7% of real queries while actually
+      # refusing some out-of-domain ones, instead of 0.80's 100%/100%.
+      MIN_RETRIEVAL_SCORE: ${MIN_RETRIEVAL_SCORE:-0.850}
       MIN_GROUNDING_OVERLAP: ${MIN_GROUNDING_OVERLAP:-0.45}
       MAX_TOKENS: ${MAX_TOKENS:-48}
       LLM_ATTEMPTS: ${LLM_ATTEMPTS:-3}
