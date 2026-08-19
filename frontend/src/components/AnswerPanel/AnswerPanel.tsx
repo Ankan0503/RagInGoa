@@ -4,7 +4,7 @@
  */
 
 import React from "react";
-import { Timer, Target, ShieldCheck } from "lucide-react";
+import { Timer, Target, ShieldCheck, AlertTriangle } from "lucide-react";
 import { useRag } from "../../context/RagContext";
 
 /**
@@ -46,7 +46,7 @@ function SourceRow({ source }: { source: Source }) {
  * Right panel answer & evidence visualization element.
  */
 export default function AnswerPanel() {
-  const { query, answer, sources, metrics } = useRag();
+  const { query, answer, sources, metrics, groundingWarning } = useRag();
 
   const displaySources: Source[] = sources.length > 0
     ? sources.slice(0, 3).map((s, idx) => ({
@@ -75,7 +75,13 @@ export default function AnswerPanel() {
   const displayQuery = query || "What factors affect the efficiency of renewable energy systems?";
   const displayAnswer = answer || "The efficiency of renewable energy systems depends on several factors such as resource availability, system design, location, weather conditions, storage capability, and maintenance practices.";
   const retrievalTime = metrics?.retrieval_latency_ms ? `${Math.round(metrics.retrieval_latency_ms)}ms` : "87ms";
-  const groundedPercentage = metrics?.ttft_ms ? `${Math.min(99, Math.max(80, Math.round(100 - (metrics.ttft_ms / 50))))}%` : "96%";
+  // When the gate actually reports an overlap score, show that real number
+  // rather than the ttft-derived placeholder.
+  const groundedPercentage = groundingWarning?.score != null
+    ? `${(groundingWarning.score * 100).toFixed(0)}%`
+    : metrics?.ttft_ms
+      ? `${Math.min(99, Math.max(80, Math.round(100 - (metrics.ttft_ms / 50))))}%`
+      : "96%";
   const passagesCount = sources.length > 0 ? sources.length : 5;
 
   return (
@@ -120,10 +126,36 @@ export default function AnswerPanel() {
           Answer
         </span>
 
-        {/* Row 4: Generated Answer text paragraph */}
-        <p className="font-sans font-normal text-[14.5px] text-[#202522] leading-[1.5] mt-[12px] text-justify">
+        {/* Row 4: Generated Answer text paragraph.
+            Answers stream in live and are validated afterwards, so this text
+            can already be on screen when the grounding gate rejects it. It is
+            dimmed rather than removed -- silently deleting text the user has
+            already read reads as a bug, while the banner below states plainly
+            that the system caught it. */}
+        <p
+          className={`font-sans font-normal text-[14.5px] leading-[1.5] mt-[12px] text-justify transition-opacity duration-300 ${
+            groundingWarning ? "text-[#6B716D] opacity-70" : "text-[#202522]"
+          }`}
+        >
           {displayAnswer}
         </p>
+
+        {groundingWarning && (
+          <div className="mt-[12px] flex items-start gap-2 rounded-[10px] border border-[#F0D9A8] bg-[#FDF7EA] px-3 py-2.5">
+            <AlertTriangle className="w-[15px] h-[15px] stroke-[2] text-[#B8801F] shrink-0 mt-[2px]" />
+            <div className="flex flex-col">
+              <span className="font-sans font-medium text-[13px] text-[#8A5F12] leading-[1.4]">
+                {groundingWarning.message}
+              </span>
+              {groundingWarning.score != null && (
+                <span className="font-sans font-normal text-[11.5px] text-[#A07B31] mt-[3px]">
+                  Grounding overlap {(groundingWarning.score * 100).toFixed(0)}%
+                  {groundingWarning.detail ? ` — ${groundingWarning.detail}` : ""}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Second Divider */}
         <hr className="border-0 border-t border-[#E6E6E1] mt-[18px]" />

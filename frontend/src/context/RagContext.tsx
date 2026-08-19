@@ -35,6 +35,14 @@ export type PipelineStage =
   | "done"
   | "error";
 
+/** Result of the grounding gate, which now runs AFTER the answer has streamed
+ *  out. `null` means it has not run or the answer was fine. */
+export interface GroundingWarning {
+  score?: number | null;
+  detail?: string | null;
+  message: string;
+}
+
 interface RagContextType {
   isConnected: boolean;
   isListening: boolean;
@@ -46,9 +54,18 @@ interface RagContextType {
   metrics: LatencyMetrics | null;
   selectedStrategy: string;
   error: string | null;
+  /** Live transcript from Sarvam, shown while speaking and editable-in-spirit
+   *  until the user presses Send. */
+  pendingTranscript: string;
+  /** True once speech has ended and a transcript is waiting to be sent. */
+  awaitingSend: boolean;
+  groundingWarning: GroundingWarning | null;
   setSelectedStrategy: (strategy: string) => void;
+  setPendingTranscript: (text: string) => void;
   startListening: () => Promise<void>;
   stopListening: () => void;
+  sendPending: () => void;
+  discardPending: () => void;
   sendTextQuery: (text: string) => void;
   resetSession: () => void;
 }
@@ -70,11 +87,20 @@ export function RagProvider({ children }: { children: ReactNode }) {
   const [metrics, setMetrics] = useState<LatencyMetrics | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<string>("Best Match");
   const [error, setError] = useState<string | null>(null);
+  const [pendingTranscript, setPendingTranscript] = useState<string>("");
+  const [awaitingSend, setAwaitingSend] = useState(false);
+  const [groundingWarning, setGroundingWarning] = useState<GroundingWarning | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
   const isStreamingRef = useRef(false);
+  const sttLatencyRef = useRef<number | null>(null);
+
+  // Live audio capture. MediaRecorder is gone: it produces webm/opus in
+  // ~250ms containers, but Sarvam's realtime socket wants a continuous raw
+  // PCM feed, so we tap the WebAudio graph directly instead.
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
 
   // Resolve WebSocket and REST Base URLs from .env or window.location
   const getWsUrl = (): string => {
@@ -154,11 +180,39 @@ export function RagProvider({ children }: { children: ReactNode }) {
   function handleServerMessage(data: any) {
     if (data.type === "status") {
       setStatusStage(data.stage as PipelineStage);
+    } else if (data.type === "transcript.partial" || data.type === "transcript.final") {
+      // Live feedback while the user is still speaking.
+      setPendingTranscript(data.text || "");
+    } else if (data.type === "transcript.done") {
+      // Speech ended. Hold the transcript for review -- nothing is retrieved
+      // or generated until the user presses Send.
+      setPendingTranscript(data.text || "");
+      setAwaitingSend(Boolean(data.text));
+      sttLatencyRef.current = data.stt_latency_ms ?? null;
+      setStatusStage("idle");
+      if (!data.text) {
+        setError("आवाज़ पहचानी नहीं जा सकी। कृपया दोबारा बोलें।");
+      }
     } else if (data.type === "transcript") {
       setQuery(data.text);
       if (data.stt_latency_ms) {
         setMetrics((prev) => ({ ...prev, stt_latency_ms: data.stt_latency_ms }));
       }
+    } else if (data.type === "grounding_failed") {
+      // The answer has already streamed onto the screen by this point. We do
+      // not retract it -- we flag it, and the panel dims what is shown.
+      setGroundingWarning({
+        score: data.score ?? null,
+        detail: data.detail ?? null,
+        message: data.message || "यह उत्तर संदर्भ द्वारा पूर्ण रूप से समर्थित नहीं है।"
+      });
+    } else if (data.type === "refused") {
+      isStreamingRef.current = false;
+      setIsProcessing(false);
+      setStatusStage("done");
+      setAnswer(data.answer || "");
+      setSources(data.sources || []);
+      if (data.metrics) setMetrics(data.metrics);
     } else if (data.type === "retrieval") {
       setStatusStage("generating");
       setSources(data.sources || []);
@@ -192,62 +246,122 @@ export function RagProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  // Voice Recording
+  /** Linear-interpolation resample to 16kHz mono s16le, the only format the
+   *  realtime STT socket accepts. Browsers give us 44.1k or 48k depending on
+   *  the device, so this cannot be skipped. */
+  const toPcm16k = (input: Float32Array, inRate: number): ArrayBuffer => {
+    const ratio = inRate / 16000;
+    const outLength = Math.floor(input.length / ratio);
+    const out = new Int16Array(outLength);
+    for (let i = 0; i < outLength; i++) {
+      const pos = i * ratio;
+      const lo = Math.floor(pos);
+      const hi = Math.min(lo + 1, input.length - 1);
+      const sample = input[lo] + (input[hi] - input[lo]) * (pos - lo);
+      const clamped = Math.max(-1, Math.min(1, sample));
+      out[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    }
+    return out.buffer;
+  };
+
+  const teardownAudio = () => {
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current.onaudioprocess = null;
+      processorRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+    }
+  };
+
   const startListening = async () => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setError("Backend WebSocket is not connected.");
+      return;
+    }
+
     try {
       setError(null);
+      setGroundingWarning(null);
+      setPendingTranscript("");
+      setAwaitingSend(false);
+      setAnswer("");
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      
-      let mimeType = "audio/webm;codecs=opus";
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = "audio/webm";
-      }
+      mediaStreamRef.current = stream;
 
-      const recorder = new MediaRecorder(stream, { mimeType });
-      audioChunksRef.current = [];
+      const AudioCtx =
+        (window as any).AudioContext || (window as any).webkitAudioContext;
+      const ctx: AudioContext = new AudioCtx();
+      audioCtxRef.current = ctx;
 
-      recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) {
-          audioChunksRef.current.push(e.data);
-        }
+      const source = ctx.createMediaStreamSource(stream);
+      // ScriptProcessor is deprecated in favour of AudioWorklet, but the
+      // worklet path needs a separately served module file, which is awkward
+      // inside the single-container deploy. 4096 frames is ~85ms at 48kHz --
+      // small enough that partials still feel live.
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
+
+      ws.send(JSON.stringify({ type: "stt_start" }));
+
+      processor.onaudioprocess = (e) => {
+        const socket = wsRef.current;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(toPcm16k(e.inputBuffer.getChannelData(0), ctx.sampleRate));
       };
 
-      recorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
-        const arrayBuffer = await audioBlob.arrayBuffer();
+      source.connect(processor);
+      // Route to destination with the gain implicitly zero-length; some
+      // browsers will not run onaudioprocess for a disconnected node.
+      processor.connect(ctx.destination);
 
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          setIsProcessing(true);
-          setStatusStage("transcribing");
-          isStreamingRef.current = false;
-          wsRef.current.send(arrayBuffer);
-        } else {
-          setError("Backend WebSocket is not connected. Ensure server is running on port 8000.");
-        }
-
-        stream.getTracks().forEach((track) => track.stop());
-      };
-
-      recorder.start(250);
-      mediaRecorderRef.current = recorder;
       setIsListening(true);
       setStatusStage("listening");
     } catch (err: any) {
       console.error("Microphone error:", err);
       setError("Microphone permission denied or device not found.");
       setIsListening(false);
+      teardownAudio();
     }
   };
 
   const stopListening = () => {
-    if (mediaRecorderRef.current && isListening) {
-      mediaRecorderRef.current.stop();
-      setIsListening(false);
+    if (!isListening) return;
+    teardownAudio();
+    setIsListening(false);
+    setStatusStage("transcribing");
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "stt_stop" }));
     }
   };
 
+  /** Commit the reviewed transcript. This is the Send button. */
+  const sendPending = () => {
+    const text = pendingTranscript.trim();
+    if (!text) return;
+    setAwaitingSend(false);
+    sendTextQuery(text, sttLatencyRef.current);
+    sttLatencyRef.current = null;
+  };
+
+  const discardPending = () => {
+    setPendingTranscript("");
+    setAwaitingSend(false);
+    sttLatencyRef.current = null;
+    setStatusStage("idle");
+  };
+
   // Text Query Submission
-  const sendTextQuery = (text: string) => {
+  const sendTextQuery = (text: string, sttLatencyMs?: number | null) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
@@ -257,6 +371,7 @@ export function RagProvider({ children }: { children: ReactNode }) {
     setStatusStage("retrieving");
     isStreamingRef.current = false;
     setAnswer("");
+    setGroundingWarning(null);
 
     // Map UI strategy label to backend strategy key
     let strategyKey: string | undefined = undefined;
@@ -271,7 +386,9 @@ export function RagProvider({ children }: { children: ReactNode }) {
         type: "text_query",
         text: trimmed,
         strategy: strategyKey,
-        top_k: 3
+        top_k: 3,
+        stt_latency_ms: sttLatencyMs ?? undefined,
+        transcript: sttLatencyMs != null ? trimmed : undefined
       };
       wsRef.current.send(JSON.stringify(payload));
     } else {
@@ -300,7 +417,25 @@ export function RagProvider({ children }: { children: ReactNode }) {
   const resetSession = () => {
     setStatusStage("idle");
     setError(null);
+    setGroundingWarning(null);
+    setPendingTranscript("");
+    setAwaitingSend(false);
   };
+
+  // Cloudflare drops idle WebSockets at ~100s. A light client ping keeps the
+  // socket alive between questions so the first one after a pause does not
+  // silently fail on a dead connection.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ping" }));
+      }
+    }, 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => teardownAudio, []);
 
   return (
     <RagContext.Provider
@@ -315,9 +450,15 @@ export function RagProvider({ children }: { children: ReactNode }) {
         metrics,
         selectedStrategy,
         error,
+        pendingTranscript,
+        awaitingSend,
+        groundingWarning,
         setSelectedStrategy,
+        setPendingTranscript,
         startListening,
         stopListening,
+        sendPending,
+        discardPending,
         sendTextQuery,
         resetSession
       }}
