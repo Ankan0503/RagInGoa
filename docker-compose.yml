@@ -103,16 +103,14 @@ services:
       # over and the old service removed. Container port stays 3004.
       - "${HOST_PORT:-3004}:3004"
 
-    # Application config and API keys live in backend/.env, which is gitignored.
-    # Compose itself only substitutes ${...} from the ROOT .env (see .env.example),
-    # so the two files serve different purposes: root .env parameterises this
-    # compose file, backend/.env configures the app.
-    env_file:
-      - ./backend/.env
-
+    # NOTE: there is deliberately no `env_file:` here. backend/.env is gitignored,
+    # so it does not exist in a git clone and compose fails outright with
+    # "env file ... not found". Every variable the app needs is listed explicitly
+    # below and substituted from the .env that Dokploy writes next to this file
+    # (or from the shell, for a plain `docker compose up`).
     environment:
-      # These override anything in env_file. Transport is pinned here because the
-      # manifest records which transport built the index, and retriever.py raises
+      # Transport is pinned here rather than left to env: the manifest records
+      # which transport built the index, and retriever.py raises
       # IndexUnavailableError on a mismatch — it cannot silently fall back.
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
