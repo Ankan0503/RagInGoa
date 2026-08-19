@@ -67,8 +67,13 @@ services:
       QDRANT__TELEMETRY_DISABLED: "true"
 
     healthcheck:
-      # /readyz reports ready only once collections are loaded, which is what
-      # depends_on must actually wait for.
+      # A bare TCP connect, NOT /readyz: the qdrant image ships no curl or wget.
+      # This therefore only proves the port is bound, not that collections are
+      # loaded, so `depends_on: service_healthy` is a weaker gate than it looks.
+      # The real readiness wait lives in entrypoint.sh, which polls
+      # ${QDRANT_URL}/readyz from the backend container (which does have curl)
+      # and refuses to start the app until it answers. Do not rely on this
+      # healthcheck alone for ordering.
       test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
       interval: 10s
       timeout: 5s
@@ -128,6 +133,14 @@ services:
       SARVAM_LLM_MODEL: ${SARVAM_LLM_MODEL:-sarvam-105b-conversations}
       SARVAM_REASONING_EFFORT: ${SARVAM_REASONING_EFFORT:-none}
       SARVAM_MODEL: ${SARVAM_MODEL:-saarika:v2.5}
+
+      # Realtime STT (stt_realtime.py) — the live transcript stream. Exposed as
+      # env rather than left to the module defaults specifically because the
+      # realtime wire format is still being confirmed against the live API: a
+      # correction here is an env change and a restart, not a rebuild of an
+      # image on a VM measured at ~100 kB/s to PyPI.
+      SARVAM_STT_WS_URL: ${SARVAM_STT_WS_URL:-wss://api.sarvam.ai/speech-to-text-realtime/ws}
+      SARVAM_STT_REALTIME_MODEL: ${SARVAM_STT_REALTIME_MODEL:-saaras:v3-realtime}
 
       # 0.80 was the placeholder before the index existed to calibrate against.
       # calibrate_threshold.py against the live 680k-vector index (2026-08-19)
