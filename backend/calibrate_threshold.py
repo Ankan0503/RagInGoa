@@ -51,10 +51,11 @@ from __future__ import annotations
 import os
 import sys
 import json
+import math
 import random
 import sqlite3
 import argparse
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 if sys.platform == "win32":
     try:
@@ -177,13 +178,82 @@ def evaluate(positives: List[float], negatives: List[float],
     return rows
 
 
-def pick(rows: List[Dict[str, Any]], min_answer_rate: float = 0.95) -> Dict[str, Any]:
+def _coverage_tolerance(n: int, min_answer_rate: float) -> float:
+    """
+    One standard error of the coverage estimate at this sample size. A hard cut
+    at exactly min_answer_rate treats e.g. 94.3% and 95.0% as categorically
+    different at n=300 -- but they sit well within one SE of each other there
+    (~1.3 points), i.e. statistically indistinguishable. Without this, a
+    threshold that is a fraction of a percentage point under the line gets
+    discarded outright even when it leaks meaningfully less than whatever
+    threshold happens to clear the line -- observed on real data 2026-08-19:
+    0.850 (94.3% answered) was excluded in favour of 0.840 (95.7% answered),
+    despite 0.850 leaking 66.7% vs 0.840's 72.2%.
+    """
+    if n <= 0:
+        return 0.0
+    return math.sqrt(min_answer_rate * (1 - min_answer_rate) / n)
+
+
+def pick(rows: List[Dict[str, Any]], min_answer_rate: float = 0.95,
+        n_positives: Optional[int] = None) -> Dict[str, Any]:
     balanced = max(rows, key=lambda r: r["youden_j"])
-    # Coverage-first: the strictest threshold that still answers min_answer_rate
-    # of real queries. The grounding gate is the second line of defence.
-    eligible = [r for r in rows if r["answer_rate"] >= min_answer_rate]
-    coverage = max(eligible, key=lambda r: r["threshold"]) if eligible else rows[0]
+    # Coverage-first: among thresholds within one SE of min_answer_rate or
+    # above it, take whichever LEAKS LEAST -- not whichever threshold is
+    # highest. Those aren't the same thing; see _coverage_tolerance.
+    tol = _coverage_tolerance(n_positives, min_answer_rate) if n_positives else 0.0
+    eligible = [r for r in rows if r["answer_rate"] >= min_answer_rate - tol]
+    coverage = (min(eligible, key=lambda r: (r["leak_rate"], -r["threshold"]))
+               if eligible else rows[0])
     return {"balanced": balanced, "coverage_first": coverage}
+
+
+def pair_stats(pos_score: List[float], neg_score: List[float],
+               pos_margin: List[float], neg_margin: List[float],
+               score_thr: float, margin_thr: float) -> Dict[str, float]:
+    """Answer/leak rate of the ACTUAL AND-gate: both conditions must pass."""
+    n_pos, n_neg = len(pos_score), len(neg_score)
+    ans = sum(1 for s, m in zip(pos_score, pos_margin) if s >= score_thr and m >= margin_thr)
+    leak = sum(1 for s, m in zip(neg_score, neg_margin) if s >= score_thr and m >= margin_thr)
+    return {"answer_rate": round(ans / n_pos, 4) if n_pos else 0.0,
+            "leak_rate": round(leak / n_neg, 4) if n_neg else 0.0}
+
+
+def joint_search(pos_score: List[float], neg_score: List[float],
+                 pos_margin: List[float], neg_margin: List[float],
+                 score_grid: List[float], margin_grid: List[float],
+                 min_answer_rate: float) -> Dict[str, Any]:
+    """
+    RetrievalGate ANDs the two checks, so the two independent per-signal tables
+    above do not describe what the deployed gate actually does -- a pair of
+    individually-reasonable thresholds can combine into something neither
+    number predicts. This searches the real (score_threshold, margin_threshold)
+    grid on the ACTUAL joint pass/fail per query, the same computation the gate
+    performs, and reports the pair that minimises leakage without dropping
+    coverage meaningfully below min_answer_rate (within one sampling SE — see
+    _coverage_tolerance; the same discretization-cliff issue applies here).
+    """
+    n_pos, n_neg = len(pos_score), len(neg_score)
+    eff_min = min_answer_rate - _coverage_tolerance(n_pos, min_answer_rate)
+    best_balanced = best_coverage = None
+    for ts in score_grid:
+        pos_pass_s = [s >= ts for s in pos_score]
+        neg_pass_s = [s >= ts for s in neg_score]
+        for tm in margin_grid:
+            ans = sum(1 for i in range(n_pos) if pos_pass_s[i] and pos_margin[i] >= tm)
+            leak = sum(1 for i in range(n_neg) if neg_pass_s[i] and neg_margin[i] >= tm)
+            ar = round(ans / n_pos, 4) if n_pos else 0.0
+            lr = round(leak / n_neg, 4) if n_neg else 0.0
+            row = {"score_threshold": round(ts, 4), "margin_threshold": round(tm, 4),
+                  "answer_rate": ar, "leak_rate": lr, "youden_j": round(ar - lr, 4)}
+            if best_balanced is None or row["youden_j"] > best_balanced["youden_j"]:
+                best_balanced = row
+            if ar >= eff_min and (
+                    best_coverage is None
+                    or lr < best_coverage["leak_rate"]
+                    or (lr == best_coverage["leak_rate"] and ts > best_coverage["score_threshold"])):
+                best_coverage = row
+    return {"balanced": best_balanced, "coverage_first": best_coverage}
 
 
 # ============================================================================
@@ -274,11 +344,11 @@ def main():
         )
 
     rows = evaluate(pos, neg)
-    best = pick(rows, args.min_answer_rate)
+    best = pick(rows, args.min_answer_rate, n_positives=len(pos))
 
     m_lo, m_hi, m_step = auto_range(pos_margin + neg_margin)
     rows_m = evaluate(pos_margin, neg_margin, lo=m_lo, hi=m_hi, step=m_step)
-    best_m = pick(rows_m, args.min_answer_rate)
+    best_m = pick(rows_m, args.min_answer_rate, n_positives=len(pos_margin))
 
     W = 76
     print("\n" + "=" * W)
@@ -311,39 +381,73 @@ def main():
     cur_m = _print_threshold_table(rows_m, best_m, current_margin, "MIN_SCORE_MARGIN", W,
                                    args.min_answer_rate)
 
-    # Which signal ACTUALLY separates better here? Youden's J at its best point
-    # is a single number for "how cleanly can any threshold on this signal split
-    # real from out-of-domain" — measured, not assumed, because the whole reason
-    # this script grew a second signal is that the first one was assumed to work
-    # and measurably didn't.
+    # Which signal ALONE separates better? Diagnostic only — RetrievalGate ANDs
+    # both, so neither number describes deployed behaviour by itself.
     j_score = max(x["youden_j"] for x in rows)
     j_margin = max(x["youden_j"] for x in rows_m)
-    winner = "MIN_SCORE_MARGIN" if j_margin > j_score else "MIN_RETRIEVAL_SCORE"
 
-    b, c = best["balanced"], best["coverage_first"]
-    bm, cm = best_m["balanced"], best_m["coverage_first"]
+    # The gate the server actually runs is score>=T1 AND margin>=T2. Search that
+    # joint grid on the real per-query pass/fail rather than trusting two
+    # independently-computed numbers to combine the way either predicts.
+    score_grid = sorted({row["threshold"] for row in rows})
+    margin_grid = sorted({row["threshold"] for row in rows_m})
+    joint = joint_search(pos, neg, pos_margin, neg_margin,
+                         score_grid, margin_grid, args.min_answer_rate)
+    now = pair_stats(pos, neg, pos_margin, neg_margin, current_score, current_margin)
+
     print("\n" + "=" * W)
     print("  RECOMMENDATION")
     print("=" * W)
-    print(f"  separation quality (Youden's J, higher = cleaner split):")
-    print(f"    MIN_RETRIEVAL_SCORE   best J = {j_score:.4f}")
-    print(f"    MIN_SCORE_MARGIN      best J = {j_margin:.4f}   <- {winner} separates better"
-          if j_margin != j_score else f"    MIN_SCORE_MARGIN      best J = {j_margin:.4f}")
+    print(f"  Signal separation alone (Youden's J, higher = cleaner split):")
+    print(f"    MIN_RETRIEVAL_SCORE alone   best J = {j_score:.4f}")
+    print(f"    MIN_SCORE_MARGIN alone      best J = {j_margin:.4f}")
+    print(f"  Diagnostic only — the deployed gate ANDs both. Joint search below")
+    print(f"  is what to actually act on.")
+
+    tol_pts = _coverage_tolerance(len(pos), args.min_answer_rate) * 100
+    print(f"\n  JOINT EFFECT — what the deployed AND-gate produces")
+    print(f"  (coverage bar effectively {args.min_answer_rate*100 - tol_pts:.1f}%, not a hard "
+          f"{args.min_answer_rate*100:.0f}% -- {tol_pts:.1f}pt tolerance = 1 sampling SE at "
+          f"n={len(pos)}, since a single query flips the rate by {100/len(pos):.2f}pt)")
+    print("  " + "-" * (W - 4))
+    print(f"  currently deployed   MIN_RETRIEVAL_SCORE={current_score:<7.3f}"
+          f"MIN_SCORE_MARGIN={current_margin:<8.4f}"
+          f"-> answers {now['answer_rate']*100:5.1f}%  leaks {now['leak_rate']*100:5.1f}%")
+    if joint["coverage_first"]:
+        jc = joint["coverage_first"]
+        print(f"  coverage-first pair  MIN_RETRIEVAL_SCORE={jc['score_threshold']:<7.3f}"
+              f"MIN_SCORE_MARGIN={jc['margin_threshold']:<8.4f}"
+              f"-> answers {jc['answer_rate']*100:5.1f}%  leaks {jc['leak_rate']*100:5.1f}%")
+    else:
+        print(f"  coverage-first pair  none of the {len(score_grid)*len(margin_grid)} grid "
+              f"points reach {args.min_answer_rate*100:.0f}% coverage jointly")
+    if joint["balanced"]:
+        jb = joint["balanced"]
+        print(f"  balanced pair        MIN_RETRIEVAL_SCORE={jb['score_threshold']:<7.3f}"
+              f"MIN_SCORE_MARGIN={jb['margin_threshold']:<8.4f}"
+              f"-> answers {jb['answer_rate']*100:5.1f}%  leaks {jb['leak_rate']*100:5.1f}%")
+
     print()
-    print(f"  Set BOTH — they are independent AND-ed checks (guardrails.RetrievalGate):")
-    print(f"    MIN_RETRIEVAL_SCORE={c['threshold']:.3f}   "
-          f"(coverage-first: answers {c['answer_rate']*100:.1f}%, leaks {c['leak_rate']*100:.1f}%)")
-    print(f"    MIN_SCORE_MARGIN={cm['threshold']:.4f}   "
-          f"(coverage-first: answers {cm['answer_rate']*100:.1f}%, leaks {cm['leak_rate']*100:.1f}%)")
+    if joint["coverage_first"] and joint["coverage_first"]["leak_rate"] < now["leak_rate"] - 0.001:
+        jc = joint["coverage_first"]
+        print(f"  SET:  MIN_RETRIEVAL_SCORE={jc['score_threshold']:.3f}   "
+              f"MIN_SCORE_MARGIN={jc['margin_threshold']:.4f}")
+        print(f"  This leaks {(now['leak_rate']-jc['leak_rate'])*100:.1f} points less than what is "
+              f"currently deployed, at "
+              f"{(jc['answer_rate']-now['answer_rate'])*100:+.1f} points coverage.")
+    else:
+        print(f"  KEEP the currently deployed values — nothing in the joint grid search")
+        print(f"  beats them at >= {args.min_answer_rate*100:.0f}% coverage. Adding a margin floor")
+        print(f"  did not measurably help on this run's data.")
     print()
     print("  Coverage-first is the right default here: the grounding gate already")
     print("  catches answers unsupported by context, so the retrieval gate does not")
     print("  have to be the only defence. Refusing real questions is the more")
     print("  visible failure in a demo.")
-    if cur and cur["answer_rate"] < 0.5:
+    if now["answer_rate"] < 0.5:
         print()
-        print(f"  WARNING: the current MIN_RETRIEVAL_SCORE={current_score} answers only "
-              f"{cur['answer_rate']*100:.0f}% of real queries.")
+        print(f"  WARNING: the currently deployed config answers only "
+              f"{now['answer_rate']*100:.0f}% of real queries.")
     print("=" * W + "\n")
 
     if args.json:
@@ -355,6 +459,7 @@ def main():
                 "recommended_score": best, "recommended_margin": best_m,
                 "current_score": current_score, "current_margin": current_margin,
                 "best_j_score": j_score, "best_j_margin": j_margin,
+                "joint_search": joint, "joint_current": now,
             }, f, indent=2)
         print(f"Written to {args.json}\n")
 
