@@ -88,8 +88,12 @@ class SearchFailedError(RetrieverError):
 # ============================================================================
 
 class RetrievedHit(BaseModel):
-    score: float = Field(..., description="Fused relevance score")
-    raw_score: float = Field(0.0, description="Best raw cosine similarity for this passage")
+    score: float = Field(..., description="Fused relevance score (RRF, scale-free)")
+    raw_score: float = Field(0.0, description="Best DENSE cosine similarity, 0..1. "
+                                              "This is the semantic-relevance signal the "
+                                              "retrieval guardrail thresholds on.")
+    sparse_score: float = Field(0.0, description="Best BM25 score. Unbounded — never "
+                                                 "mix with raw_score or threshold on it.")
     strategy: str = Field(..., description="Chunking strategy of the best-matching chunk")
     strategies_matched: List[str] = Field(default_factory=list,
                                           description="All strategies whose chunks matched this passage")
@@ -608,6 +612,15 @@ class IndicRetriever:
         for p in list(dense_points) + list(sparse_points):
             by_id.setdefault(p.id, p)
 
+        # Dense and sparse scores live on INCOMPATIBLE SCALES: dense is cosine in
+        # [0,1], BM25 is unbounded (observed up to 85). Keeping them in one field
+        # made raw_score meaningless and silently broke the retrieval guardrail —
+        # MIN_RETRIEVAL_SCORE=0.80 was being compared against values from 0.84 to
+        # 85, so nothing was ever refused. They are tracked separately now, and
+        # only the cosine is used as the semantic-relevance signal.
+        dense_scores = {p.id: float(p.score or 0.0) for p in dense_points}
+        sparse_scores = {p.id: float(p.score or 0.0) for p in sparse_points}
+
         fused = self._fuse([
             [p.id for p in dense_points],
             [p.id for p in sparse_points],
@@ -622,14 +635,19 @@ class IndicRetriever:
             payload = p.payload or {}
             parent_id = str(payload.get("parent_id", pid))
             entry = parents.setdefault(parent_id, {
-                "score": 0.0, "raw": 0.0, "strategies": set(),
-                "best_chunk": "", "best_strategy": "", "chunk_index": 0,
-                "total_chunks": 1, "payload": payload,
+                "score": 0.0, "raw": 0.0, "sparse": 0.0, "best_fused": -1.0,
+                "strategies": set(), "best_chunk": "", "best_strategy": "",
+                "chunk_index": 0, "total_chunks": 1, "payload": payload,
             })
             entry["score"] += fscore
-            raw = float(getattr(p, "score", 0.0) or 0.0)
-            if raw > entry["raw"]:
-                entry["raw"] = raw
+            entry["raw"] = max(entry["raw"], dense_scores.get(pid, 0.0))
+            entry["sparse"] = max(entry["sparse"], sparse_scores.get(pid, 0.0))
+
+            # Representative chunk is picked by FUSED rank, not by raw score:
+            # fused rank is the only scale-free comparison available across a
+            # dense hit and a sparse one.
+            if fscore > entry["best_fused"]:
+                entry["best_fused"] = fscore
                 entry["best_chunk"] = payload.get("chunk_text", "")
                 entry["best_strategy"] = payload.get("strategy", "unknown")
                 entry["chunk_index"] = payload.get("chunk_index", 0)
@@ -667,6 +685,7 @@ class IndicRetriever:
             hits.append(RetrievedHit(
                 score=round(e["score"], 6),
                 raw_score=round(e["raw"], 4),
+                sparse_score=round(e["sparse"], 4),
                 strategy=e["best_strategy"],
                 strategies_matched=sorted(e["strategies"]),
                 child_text=e["best_chunk"],

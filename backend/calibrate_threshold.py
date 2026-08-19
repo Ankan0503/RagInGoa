@@ -194,6 +194,21 @@ def main():
     if not pos:
         sys.exit("No positive scores collected — is the index populated?")
 
+    # Cosine similarity is bounded to [0,1]. Anything above that means a
+    # non-cosine score (BM25 is unbounded) has leaked into raw_score, which
+    # makes every threshold below meaningless. This exact bug shipped once and
+    # silently disabled the retrieval guardrail entirely.
+    out_of_range = [s for s in pos + neg if s > 1.0001 or s < -0.0001]
+    if out_of_range:
+        sys.exit(
+            f"\nABORT: {len(out_of_range)} score(s) outside the valid cosine range "
+            f"[0,1] (max seen {max(out_of_range):.4f}).\n\n"
+            f"raw_score must be the DENSE cosine only. A value above 1.0 means a\n"
+            f"BM25 score has leaked into it, in which case MIN_RETRIEVAL_SCORE is\n"
+            f"being compared against an unbounded scale and nothing will ever be\n"
+            f"refused. Fix retriever.retrieve() before calibrating.\n"
+        )
+
     rows = evaluate(pos, neg)
     best = pick(rows, args.min_answer_rate)
 
