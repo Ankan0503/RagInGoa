@@ -136,6 +136,14 @@ services:
       # coverage-first value: answers 95.7% of real queries while actually
       # refusing some out-of-domain ones, instead of 0.80's 100%/100%.
       MIN_RETRIEVAL_SCORE: ${MIN_RETRIEVAL_SCORE:-0.850}
+
+      # Relative-margin gate (retriever.py score_margin): does the top passage
+      # stand out from the field, or is everything similarly mediocre? Added
+      # because MIN_RETRIEVAL_SCORE alone barely separates real from
+      # out-of-domain queries on this index (both cluster ~0.87-0.90 cosine).
+      # 0.0 is a no-op — margin is never negative, so this check always passes
+      # until calibrated. Calibrate with calibrate_threshold.py before raising it.
+      MIN_SCORE_MARGIN: ${MIN_SCORE_MARGIN:-0.0}
       MIN_GROUNDING_OVERLAP: ${MIN_GROUNDING_OVERLAP:-0.45}
       MAX_TOKENS: ${MAX_TOKENS:-48}
       LLM_ATTEMPTS: ${LLM_ATTEMPTS:-3}

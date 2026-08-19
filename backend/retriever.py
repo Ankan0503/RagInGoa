@@ -112,6 +112,14 @@ class RetrievalResult(BaseModel):
     combined_parent_context: str
     hits: List[RetrievedHit] = Field(default_factory=list)
     top_score: float = 0.0
+    score_margin: float = Field(0.0, description=
+        "top_score minus the mean of the next MARGIN_WINDOW candidate passages' "
+        "raw scores. Low margin means nothing stood out from the field — the "
+        "signal the OFF_TOPIC gate actually needs, since absolute E5 cosine "
+        "barely separates real from off-topic queries on its own (calibrated "
+        "2026-08-19: real p50=0.896, out-of-domain p50=0.872).")
+    margin_candidates: int = Field(0, description=
+        "distinct passages the margin was computed over")
     embed_latency_ms: float = 0.0
     search_latency_ms: float = 0.0
     fusion_latency_ms: float = 0.0
@@ -230,6 +238,7 @@ class IndicRetriever:
 
     RRF_K = 60          # standard RRF damping constant
     OVERFETCH = 8       # chunks pulled per requested passage, before fusion
+    MARGIN_WINDOW = 10  # candidates averaged for the "rest of the field" in score_margin
 
     def __init__(
         self,
@@ -658,6 +667,22 @@ class IndicRetriever:
             if st:
                 entry["strategies"].add(st)
 
+        # Relative margin: does the best-matching PASSAGE stand out from the other
+        # candidates, or is everything roughly equally (ir)relevant? Computed over
+        # DISTINCT PARENTS (entry["raw"], one value per passage), not raw chunks —
+        # doing it pre-dedup would let several chunks of the SAME top passage
+        # dominate both "top" and "rest" simultaneously (multi-strategy chunking
+        # means a strong passage often has 3-4 matching chunks), which deflates
+        # the apparent margin exactly when the signal should be strongest.
+        # MARGIN_WINDOW candidates below the top are averaged rather than all of
+        # them, so a long tail of weak matches can't dilute a genuine standout.
+        all_raw = sorted((e["raw"] for e in parents.values()), reverse=True)
+        top_raw = all_raw[0] if all_raw else 0.0
+        _rest = all_raw[1:1 + self.MARGIN_WINDOW]
+        mean_rest = (sum(_rest) / len(_rest)) if _rest else top_raw
+        score_margin = round(max(0.0, top_raw - mean_rest), 4)
+        margin_candidates = len(all_raw)
+
         ordered = sorted(parents.items(), key=lambda kv: kv[1]["score"], reverse=True)[:top_k]
         prof_fusion.__exit__(None, None, None)
         fusion_ms = (time.perf_counter() - t0) * 1000
@@ -706,6 +731,8 @@ class IndicRetriever:
             combined_parent_context="\n\n".join(contexts),
             hits=hits,
             top_score=round(max((h.raw_score for h in hits), default=0.0), 4),
+            score_margin=score_margin,
+            margin_candidates=margin_candidates,
             embed_latency_ms=round(embed_ms, 2),
             search_latency_ms=round(search_ms, 2),
             fusion_latency_ms=round(fusion_ms, 2),
@@ -767,6 +794,8 @@ if __name__ == "__main__":
         print(f"  mode={res.mode} | embed={res.embed_latency_ms}ms "
               f"search={res.search_latency_ms}ms fuse={res.fusion_latency_ms}ms "
               f"parent={res.parent_fetch_latency_ms}ms TOTAL={res.total_retrieval_latency_ms}ms")
+        print(f"  top_score={res.top_score}  score_margin={res.score_margin} "
+              f"(over {res.margin_candidates} candidate passages)")
         for i, h in enumerate(res.hits, 1):
             print(f"   #{i} raw={h.raw_score:.4f} fused={h.score:.5f} "
                   f"strategies={h.strategies_matched} | {h.parent_text[:80]}...")

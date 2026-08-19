@@ -105,6 +105,10 @@ class Limits:
     LLM_ATTEMPTS       = int(os.getenv("LLM_ATTEMPTS", "3"))
     BACKOFF_BASE_S     = 0.15
     MIN_RETRIEVAL_SCORE = float(os.getenv("MIN_RETRIEVAL_SCORE", "0.80"))
+    # 0.0 = inert (margin is never negative, so the check always passes) until
+    # calibrated. See guardrails.RetrievalGate for why the absolute floor alone
+    # cannot separate real from off-topic queries on this index.
+    MIN_SCORE_MARGIN   = float(os.getenv("MIN_SCORE_MARGIN", "0.0"))
     MIN_GROUNDING      = float(os.getenv("MIN_GROUNDING_OVERLAP", "0.45"))
     MAX_QUERY_CHARS    = int(os.getenv("MAX_QUERY_CHARS", "512"))
     MAX_TOKENS         = int(os.getenv("MAX_TOKENS", "48"))
@@ -350,10 +354,12 @@ async def lifespan(app: FastAPI):
     # 2. guardrails ---------------------------------------------------------
     state.guards = GuardrailPipeline(
         min_retrieval_score=Limits.MIN_RETRIEVAL_SCORE,
+        min_score_margin=Limits.MIN_SCORE_MARGIN,
         min_grounding_overlap=Limits.MIN_GROUNDING,
         max_query_chars=Limits.MAX_QUERY_CHARS,
     )
     logger.info(f"Guardrails armed | retrieval floor={Limits.MIN_RETRIEVAL_SCORE} "
+                f"| score margin floor={Limits.MIN_SCORE_MARGIN} "
                 f"| grounding floor={Limits.MIN_GROUNDING}")
 
     # 3. STT ----------------------------------------------------------------
@@ -490,6 +496,7 @@ async def health_check():
         "guardrails": {
             "armed": state.guards is not None,
             "retrieval_floor": Limits.MIN_RETRIEVAL_SCORE,
+            "score_margin_floor": Limits.MIN_SCORE_MARGIN,
             "grounding_floor": Limits.MIN_GROUNDING,
         },
     }
@@ -595,7 +602,8 @@ async def run_rag_pipeline(
 
     # ---- gate 2: retrieval ------------------------------------------------
     with prof.stage("guard_retrieval"):
-        v_ret = state.guards.check_retrieval([h.raw_score for h in rr.hits])
+        v_ret = state.guards.check_retrieval(
+            [h.raw_score for h in rr.hits], margin=rr.score_margin)
     if not v_ret.allowed:
         logger.info(f"[REFUSED:{v_ret.reason.value}] {query!r} — {v_ret.detail}")
         # Sources still returned: "closest thing I found, not close enough to
