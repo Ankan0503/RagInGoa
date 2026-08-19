@@ -12,7 +12,8 @@ import json
 import random
 import asyncio
 import logging
-from typing import Optional, List, Dict, Any, Callable, Awaitable, TypeVar
+from typing import (Optional, List, Dict, Any, Callable, Awaitable, TypeVar,
+                    AsyncIterator)
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -36,6 +37,7 @@ from retriever import (
     RetrieverError, IndexUnavailableError, IndexMismatchError, SearchFailedError,
 )
 from audio_stt import SarvamSTTClient
+from stt_realtime import SarvamRealtimeSTT, STTRealtimeError
 from guardrails import GuardrailPipeline, Verdict, RefusalReason
 from profiling import Profiler, DEFAULT_BUDGET_MS
 from llm import build_llm, BaseLLM, LLMError, available_providers
@@ -505,6 +507,164 @@ async def run_rag_pipeline(
     )
 
 
+async def run_rag_pipeline_streaming(
+    query: str,
+    top_k: int = 3,
+    strategy: Optional[str] = None,
+    query_type: Optional[str] = None,
+    temperature: float = 0.0,
+    max_tokens: int = Limits.MAX_TOKENS,
+    stt_ms: Optional[float] = None,
+    transcript: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> AsyncIterator[Dict[str, Any]]:
+    """The same pipeline as run_rag_pipeline, yielded as events instead of
+    returned as one object, so tokens reach the browser as the LLM produces
+    them rather than after the whole answer exists.
+
+    The one behavioural difference is deliberate and it matters: the grounding
+    gate runs AFTER the answer has already streamed out, because it needs the
+    complete text and we are not willing to withhold the answer that long. A
+    failed check therefore cannot suppress the answer -- it emits a
+    `grounding_failed` event and the UI flags what is already on screen. The
+    input and retrieval gates still run BEFORE anything is generated, so an
+    unsafe or unsupported query is refused with nothing shown, exactly as
+    before.
+    """
+    prof = Profiler(budget_ms=DEFAULT_BUDGET_MS, label="rag-stream")
+
+    if stt_ms is not None:
+        prof.record("stt", stt_ms, in_budget=False, detail="Sarvam realtime STT")
+
+    with prof.stage("guard_input"):
+        v_in = state.guards.check_input(query)
+    if not v_in.allowed:
+        logger.info(f"[REFUSED:{v_in.reason.value}] {query!r} — {v_in.detail}")
+        yield {"type": "refused",
+               **_refusal_response(query, v_in, _breakdown_from(prof),
+                                   transcript=transcript).model_dump()}
+        return
+
+    try:
+        rr: RetrievalResult = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: state.retriever.retrieve(
+                query=query, top_k=top_k, strategy=strategy,
+                query_type=query_type, profiler=prof))
+    except SearchFailedError as e:
+        logger.error(f"Search failed: {e}")
+        yield {"type": "error", "message": f"खोज विफल: {e}"}
+        return
+
+    with prof.stage("guard_retrieval"):
+        v_ret = state.guards.check_retrieval(
+            [h.raw_score for h in rr.hits], margin=rr.score_margin)
+    if not v_ret.allowed:
+        logger.info(f"[REFUSED:{v_ret.reason.value}] {query!r} — {v_ret.detail}")
+        yield {"type": "refused",
+               **_refusal_response(query, v_ret, _breakdown_from(prof),
+                                   sources=rr.hits, transcript=transcript).model_dump()}
+        return
+
+    with prof.stage("prompt_build"):
+        context = rr.combined_parent_context.strip()
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT_TEMPLATE.format(context=context)},
+            {"role": "user", "content": f"प्रश्न: {query}"},
+        ]
+
+    yield {
+        "type": "retrieval",
+        "retrieval_latency_ms": round(sum(
+            s.ms for s in prof.stages if s.name in (
+                "query_normalize", "embed_query", "search_dense",
+                "bm25_encode", "search_sparse", "fusion_rrf", "parent_fetch")), 3),
+        "sources": [h.model_dump() for h in rr.hits],
+    }
+
+    try:
+        llm = state.get_llm(provider)
+    except LLMError as e:
+        yield {"type": "error", "message": str(e)}
+        return
+
+    answer = ""
+    degraded = False
+    tokens = 0
+    ttft: Optional[float] = None
+
+    if llm is None:
+        degraded = True
+        answer = "उत्तर निर्माण सेवा उपलब्ध नहीं है। नीचे प्राप्त संदर्भ देखें।"
+        yield {"type": "token", "delta": answer}
+    else:
+        # No call_with_retry here: once the first token is on the user's
+        # screen a silent retry would splice two different answers together.
+        # A mid-stream failure degrades instead, keeping what was shown.
+        with prof.stage("llm_generate") as st:
+            try:
+                async for delta, result in llm.stream(
+                        messages, temperature=temperature, max_tokens=max_tokens):
+                    if delta:
+                        answer += delta
+                        yield {"type": "token", "delta": delta}
+                    if result is not None:
+                        tokens = result.completion_tokens or len(answer.split())
+                        ttft = result.ttft_ms
+                st.detail = f"{llm.provider} {tokens} tok streamed"
+            except Exception as e:
+                logger.error(f"stream failed after {len(answer)} chars: {e}")
+                degraded = True
+                st.detail = f"FAILED mid-stream: {e}"
+                if not answer:
+                    answer = "उत्तर निर्माण अभी विफल रहा। नीचे प्राप्त संदर्भ उपलब्ध है।"
+                    yield {"type": "token", "delta": answer}
+
+    # --- validate after ---------------------------------------------------
+    grounding_score = None
+    grounding_passed = True
+    grounding_detail = None
+    if not degraded and answer:
+        with prof.stage("guard_answer"):
+            v_ans = state.guards.check_answer(answer, context)
+        grounding_score = v_ans.score
+        grounding_passed = v_ans.allowed
+        grounding_detail = v_ans.detail
+        if not grounding_passed:
+            logger.warning(f"[UNGROUNDED-POSTSTREAM] {query!r} — {v_ans.detail} | answer={answer!r}")
+            yield {
+                "type": "grounding_failed",
+                "score": grounding_score,
+                "detail": grounding_detail,
+                "message": "यह उत्तर संदर्भ द्वारा पूर्ण रूप से समर्थित नहीं है।",
+            }
+
+    m = _breakdown_from(prof, tokens=tokens, degraded=degraded,
+                        llm_provider=llm.provider if llm else None,
+                        llm_model=llm.model if llm else None)
+    if m.generation_ms > 0:
+        m.tokens_per_second = round(tokens / (m.generation_ms / 1000.0), 2)
+
+    metrics = m.model_dump()
+    if ttft is not None:
+        metrics["ttft_ms"] = ttft
+        metrics["first_token_latency_ms"] = ttft
+
+    yield {
+        "type": "done",
+        "full_answer": answer,
+        "refused": False,
+        "guardrails": GuardrailReport(
+            input_passed=True, retrieval_passed=True,
+            grounding_passed=grounding_passed, refused=False,
+            reason=None if grounding_passed else RefusalReason.UNGROUNDED_ANSWER.value,
+            detail=grounding_detail,
+            retrieval_score=v_ret.score, grounding_score=grounding_score,
+            total_gate_latency_ms=m.guardrail_ms,
+        ).model_dump(),
+        "metrics": metrics,
+    }
+
+
 @app.post("/api/text-query", response_model=QueryResponse)
 async def process_text_query(req: TextQueryRequest):
     _require_index()
@@ -515,10 +675,86 @@ async def process_text_query(req: TextQueryRequest):
     )
 
 
+class _LiveSTTSession:
+    """Bridges the browser socket to Sarvam's realtime STT socket.
+
+    Audio arrives from the browser as raw PCM s16le @16kHz (resampled in the
+    page, see RagContext.tsx) and is forwarded as it comes. A background task
+    pumps Sarvam's transcripts straight back out to the browser, so partials
+    appear while the user is still talking.
+    """
+
+    def __init__(self, websocket: WebSocket):
+        self.websocket = websocket
+        self.stt: Optional[SarvamRealtimeSTT] = None
+        self.pump: Optional[asyncio.Task] = None
+        self.text = ""
+        self.started_at = 0.0
+
+    async def start(self) -> bool:
+        try:
+            self.stt = await SarvamRealtimeSTT().__aenter__()
+        except STTRealtimeError as e:
+            logger.error(f"realtime STT unavailable: {e}")
+            await self.websocket.send_json(
+                {"type": "error", "message": "वॉइस सेवा उपलब्ध नहीं है।"})
+            return False
+        self.started_at = time.perf_counter()
+        self.pump = asyncio.create_task(self._pump())
+        await self.websocket.send_json({"type": "status", "stage": "listening"})
+        return True
+
+    async def _pump(self):
+        try:
+            async for t in self.stt.transcripts():
+                if t.is_final:
+                    # Finals supersede rather than append -- Sarvam re-sends the
+                    # whole utterance, so concatenating would duplicate it.
+                    self.text = t.text
+                await self.websocket.send_json({
+                    "type": "transcript.partial" if not t.is_final else "transcript.final",
+                    "text": t.text if t.is_final else (self.text + " " + t.text).strip(),
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"STT pump ended: {e}")
+
+    async def feed(self, pcm: bytes):
+        if self.stt is not None:
+            await self.stt.send_audio(pcm)
+
+    async def stop(self) -> float:
+        """Close the STT side and return the elapsed listening time in ms."""
+        elapsed = (time.perf_counter() - self.started_at) * 1000.0 if self.started_at else 0.0
+        if self.stt is not None:
+            await self.stt.signal_end()
+            # Give Sarvam a moment to flush the final transcript before closing.
+            try:
+                await asyncio.wait_for(asyncio.shield(self.pump), timeout=2.0)
+            except Exception:
+                pass
+            await self.stt.close()
+        if self.pump is not None and not self.pump.done():
+            self.pump.cancel()
+        self.stt = None
+        self.pump = None
+        return round(elapsed, 2)
+
+    async def abort(self):
+        if self.pump is not None and not self.pump.done():
+            self.pump.cancel()
+        if self.stt is not None:
+            await self.stt.close()
+        self.stt = None
+        self.pump = None
+
+
 @app.websocket("/ws/voice-rag")
 async def websocket_voice_rag(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket connected")
+    session = _LiveSTTSession(websocket)
 
     try:
         while True:
@@ -528,7 +764,7 @@ async def websocket_voice_rag(websocket: WebSocket):
                 break
 
             try:
-                await _handle_ws_message(websocket, message)
+                await _handle_ws_message(websocket, message, session)
             except WebSocketDisconnect:
                 raise
             except HTTPException as e:
@@ -541,100 +777,79 @@ async def websocket_voice_rag(websocket: WebSocket):
         logger.info("WebSocket disconnected")
     except Exception as e:
         logger.error(f"WebSocket session error: {e}")
+    finally:
+        await session.abort()
 
 
-async def _handle_ws_message(websocket: WebSocket, message: Dict[str, Any]):
-    t_pipeline_start = time.perf_counter()
+async def _handle_ws_message(websocket: WebSocket, message: Dict[str, Any],
+                             session: "_LiveSTTSession"):
+    # Binary frames are always live audio for the open STT session.
+    if message.get("bytes") is not None:
+        await session.feed(message["bytes"])
+        return
 
-    audio_bytes: Optional[bytes] = None
-    text_query: Optional[str] = None
-    top_k, strategy = 3, None
+    raw = message.get("text")
+    if not raw:
+        return
 
-    if message.get("bytes"):
-        audio_bytes = message["bytes"]
-    elif message.get("text"):
-        try:
-            payload = json.loads(message["text"])
-            if payload.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
-                return
-            if payload.get("type") in ("text_query", "query"):
-                text_query = payload.get("text") or payload.get("query")
-                top_k = int(payload.get("top_k", 3))
-                strategy = payload.get("strategy")
-        except json.JSONDecodeError:
-            text_query = message["text"]
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = {"type": "query", "text": raw}
 
-    if not audio_bytes and not text_query:
+    kind = payload.get("type")
+
+    if kind == "ping":
+        await websocket.send_json({"type": "pong"})
+        return
+
+    if kind == "stt_start":
+        await session.start()
+        return
+
+    if kind == "stt_stop":
+        stt_ms = await session.stop()
+        # The transcript now sits in the UI awaiting the user's Send. Nothing
+        # is retrieved or generated until they confirm it -- that review step
+        # is the whole point of streaming the transcript in the first place.
+        await websocket.send_json({
+            "type": "transcript.done",
+            "text": session.text,
+            "stt_latency_ms": stt_ms,
+        })
+        return
+
+    if kind not in ("text_query", "query", "send"):
+        return
+
+    text_query = (payload.get("text") or payload.get("query") or "").strip()
+    if not text_query:
         await websocket.send_json({"type": "error", "message": "खाली अनुरोध।"})
         return
 
     _require_index()
 
-    stt_ms: Optional[float] = None
-    transcript: Optional[str] = None
-
-    if audio_bytes:
-        if not state.stt_client:
-            await websocket.send_json({"type": "error", "message": "वॉइस सेवा कॉन्फ़िगर नहीं है।"})
-            return
-
-        await websocket.send_json({"type": "status", "stage": "transcribing"})
-
-        async def _stt():
-            res = await state.stt_client.transcribe_bytes_async(
-                audio_bytes=audio_bytes, filename="live_recording.webm")
-            if res.status != "success" or not res.transcript:
-                raise RuntimeError(res.error_message or "no speech recognised")
-            return res
-
-        try:
-            stt_res, _ = await call_with_retry(
-                "stt", _stt, Limits.STT_ATTEMPTS, Limits.STT_TIMEOUT_S)
-        except StageError as e:
-            logger.error(str(e))
-            await websocket.send_json({"type": "error", "message": "आवाज़ पहचानी नहीं जा सकी। कृपया दोबारा बोलें।"})
-            return
-
-        stt_ms = stt_res.stt_latency_ms
-        transcript = text_query = stt_res.transcript
-        await websocket.send_json({"type": "transcript", "text": transcript, "stt_latency_ms": stt_ms})
-
+    t_pipeline_start = time.perf_counter()
     await websocket.send_json({"type": "status", "stage": "retrieving"})
 
-    result = await run_rag_pipeline(
-        query=text_query, top_k=top_k, strategy=strategy,
-        stt_ms=stt_ms, transcript=transcript,
-    )
+    generating_announced = False
+    async for event in run_rag_pipeline_streaming(
+        query=text_query,
+        top_k=int(payload.get("top_k", 3)),
+        strategy=payload.get("strategy"),
+        stt_ms=payload.get("stt_latency_ms"),
+        transcript=payload.get("transcript"),
+        provider=payload.get("provider"),
+    ):
+        if event["type"] == "token" and not generating_announced:
+            generating_announced = True
+            await websocket.send_json({"type": "status", "stage": "generating"})
 
-    await websocket.send_json({
-        "type": "retrieval",
-        "retrieval_latency_ms": result.metrics.retrieval_ms,
-        "embed_latency_ms": result.metrics.embed_ms,
-        "search_latency_ms": result.metrics.search_ms,
-        "sources": [h.model_dump() for h in result.sources],
-    })
+        if event["type"] == "done":
+            event["metrics"]["total_pipeline_latency_ms"] = round(
+                (time.perf_counter() - t_pipeline_start) * 1000, 2)
 
-    await websocket.send_json({"type": "status", "stage": "generating"})
-    for piece in _chunk_text(result.answer):
-        await websocket.send_json({"type": "token", "delta": piece})
-
-    total_ms = (time.perf_counter() - t_pipeline_start) * 1000
-    metrics = result.metrics.model_dump()
-    metrics["total_pipeline_latency_ms"] = round(total_ms, 2)
-
-    await websocket.send_json({
-        "type": "done",
-        "full_answer": result.answer,
-        "refused": result.refused,
-        "guardrails": result.guardrails.model_dump(),
-        "metrics": metrics,
-    })
-
-
-def _chunk_text(text: str, size: int = 12):
-    for i in range(0, len(text or ""), size):
-        yield text[i:i + size]
+        await websocket.send_json(event)
 
 
 frontend_dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
