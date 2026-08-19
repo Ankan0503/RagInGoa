@@ -1,4 +1,10 @@
-# --- serving (what the Docker image installs) ---
+# ==============================================================================
+# SERVING dependencies — everything the container needs to answer a query.
+# ==============================================================================
+# Deliberately minimal. The deploy target is an Oracle ARM VM measured at
+# 80-140 kB/s to PyPI, where a 46MB wheel is a five-minute download and a build
+# failure waiting to happen. Anything not on the request path is excluded.
+
 fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
 python-multipart>=0.0.9
@@ -12,19 +18,19 @@ qdrant-client>=1.8.0
 numpy>=1.24.0
 
 # external services
-# groq SDK no longer needed: llm.py talks to Groq and Sarvam
-# through their shared OpenAI-compatible API using httpx.
-httpx>=0.27.0
-requests>=2.31.0
+httpx>=0.27.0             # llm.py (Groq + Sarvam)
+requests>=2.31.0          # audio_stt.py
 
-# --- ingestion / benchmarking (not needed to serve a prebuilt index) ---
-pyarrow>=15.0.0           # used directly by ingest_pipeline + benchmark
-huggingface_hub>=0.23.0
-# 'datasets' removed: nothing imports it. hf_hub_download (huggingface_hub) and
-# pyarrow cover every dataset access, and datasets pulls a large transitive tree
-# into an image that should never touch the corpus at runtime.
-tqdm>=4.66.0
-
-# --- index building on GPU (Colab/Kaggle only, see build_index_gpu.py) ---
-# sentence-transformers>=3.0.0
-# torch
+# ------------------------------------------------------------------------------
+# NOT installed here, and why
+# ------------------------------------------------------------------------------
+# pyarrow (46.8MB)  only imported inside functions in ingest_pipeline.py,
+#                   build_index_gpu.py, and benchmark.py's opt-in parquet
+#                   fallback. The server never reaches any of them. This is the
+#                   wheel whose download timed out and failed the first build.
+# huggingface_hub   pulled in transitively by fastembed; no need to pin it.
+# tqdm              ingest_pipeline.py progress bars only.
+# datasets          nothing imports it at all.
+#
+# Building an index or benchmarking against the parquet needs the extras:
+#     pip install -r requirements-build.txt

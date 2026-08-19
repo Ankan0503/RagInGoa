@@ -21,16 +21,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl build-essential && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt ./backend/
-RUN pip install --no-cache-dir -r ./backend/requirements.txt
+
+# The deploy target's route to PyPI is measured at 80-140 kB/s, where pip's
+# default 15s read timeout kills a slow-but-working download mid-wheel. The
+# BuildKit cache mount is the important part: a retried build reuses whatever
+# already downloaded instead of starting the whole set over. The cache is not
+# part of the image, so --no-cache-dir is unnecessary here.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --timeout 120 --retries 10 -r ./backend/requirements.txt
 
 # Pre-bake embedding models so the container never downloads at boot.
 #
-# The previous image baked intfloat/multilingual-e5-large (2.24GB) even though
-# the shipped index was 384-dim MiniLM. Both models used by this project are
-# baked instead, and together they are still under a third of e5-large's size:
-#   multilingual-e5-small  0.47GB  - new index (build_index_gpu.py)
-#   paraphrase-MiniLM-L12  0.22GB  - legacy index fallback
-# BM25 is tiny and needed for hybrid retrieval.
+# Only what this deployment actually uses:
+#   multilingual-e5-small  0.47GB  - matches the shipped index
+#   Qdrant/bm25            ~0.01GB - hybrid retrieval
+#
+# paraphrase-MiniLM-L12 (0.22GB) was baked as a legacy-index fallback and is now
+# dropped: the manifest declares transport=server, and startup refuses to run
+# local mode against it, so that path is unreachable here. On a link measured at
+# ~100 kB/s, 220MB is over half an hour of build time for a model that can never
+# load. (The original image baked e5-large at 2.24GB, which was worse still.)
+ENV HF_HUB_DOWNLOAD_TIMEOUT=120
+
 RUN python -c "\
 from fastembed import TextEmbedding, SparseTextEmbedding; \
 from fastembed.common.model_description import PoolingType, ModelSource; \
@@ -39,7 +51,6 @@ TextEmbedding.add_custom_model(model='intfloat/multilingual-e5-small', \
     sources=ModelSource(hf='intfloat/multilingual-e5-small'), \
     dim=384, model_file='onnx/model.onnx'); \
 list(TextEmbedding('intfloat/multilingual-e5-small').embed(['warmup'])); \
-list(TextEmbedding('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2').embed(['warmup'])); \
 list(SparseTextEmbedding('Qdrant/bm25', disable_stemmer=True).embed(['warmup']))"
 
 # Application code. .dockerignore keeps .env and __pycache__ out of the image;
