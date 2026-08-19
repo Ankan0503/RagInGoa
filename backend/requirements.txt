@@ -8,7 +8,13 @@
 fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
 python-multipart>=0.0.9
-websockets>=12.0
+# >=14.0, not >=12.0: websockets 14 made the asyncio implementation the default
+# for websockets.connect() and renamed its extra_headers argument to
+# additional_headers. stt_realtime.py passes the Sarvam api-subscription-key
+# that way, so on 12.x/13.x the realtime STT socket fails with a TypeError at
+# connect time. Fresh installs resolve to 17.x and are fine; this floor stops a
+# pinned or cached older resolution from silently breaking voice input.
+websockets>=14.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
 

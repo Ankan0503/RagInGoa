@@ -36,3 +36,6 @@ groq.json
 sarvam.json
 calib.json
 results.json
+
+# local voice recordings used with backend/probe_realtime_stt.py
+*.wav
