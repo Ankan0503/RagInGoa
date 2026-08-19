@@ -24,11 +24,10 @@ import uuid
 import logging
 import argparse
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Generator, Optional, Tuple
+from typing import List, Dict, Any, Generator, Optional
 from dataclasses import dataclass, asdict
 import numpy as np
 
-# Ensure UTF-8 stdout on Windows
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -36,7 +35,6 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Configure Structured Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-7s | %(message)s",
@@ -45,36 +43,26 @@ logging.basicConfig(
 logger = logging.getLogger("IndicRAGIngest")
 
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
 @dataclass
 class IngestConfig:
-    """Configuration settings for MSMARCO-XI Indic Ingestion & Indexing."""
     dataset_name: str = "ai4bharat/MSMARCO-XI"
-    dataset_split: str = "validation"  # 'validation' (hinval.parquet) or 'train' (hintrain.parquet)
-    sample_limit: int = 100  # Number of samples to ingest (0 for all)
+    dataset_split: str = "validation"
+    sample_limit: int = 100
     collection_name: str = "indic_rag_msmarco_hi"
     qdrant_path: str = "./qdrant_data"
     embedding_model: str = "intfloat/multilingual-e5-large"
-    embedding_dim: Optional[int] = None  # Auto-detected if None
+    embedding_dim: Optional[int] = None
     embedding_batch_size: int = 16
     upsert_batch_size: int = 32
     window_sentences: int = 2
     overlap_sentences: int = 1
     min_chunk_chars: int = 15
-    strategy: str = "all"  # 'parent_child', 'sliding_window', or 'all'
-    index_all_passages: bool = False  # If True, index all 10 passages per query; If False, index positive/selected passages
+    strategy: str = "all"
+    index_all_passages: bool = False
 
-
-# ============================================================================
-# DATA MODELS
-# ============================================================================
 
 @dataclass
 class ChunkPayload:
-    """Rich metadata payload stored alongside each vector point in Qdrant."""
     chunk_id: str
     strategy: str
     parent_id: str
@@ -92,25 +80,11 @@ class ChunkPayload:
         return asdict(self)
 
 
-# ============================================================================
-# INDIC SENTENCE SEGMENTER
-# ============================================================================
-
 class IndicSentenceSplitter:
-    """
-    Indic-Aware Sentence Segmenter.
-    Splits text on Devanagari danda ('।'), double danda ('॥'),
-    as well as standard punctuation ('?', '!', '.', '\n').
-    """
-    
     BOUNDARY_REGEX = re.compile(r'([।॥?!.\n]+)')
 
     @classmethod
     def split(cls, text: str, min_chars: int = 15) -> List[str]:
-        """
-        Segments raw Hindi text into clean sentences while preserving punctuation
-        and filtering out noise/fragments with character count < min_chars.
-        """
         if not text or not text.strip():
             return []
 
@@ -143,26 +117,13 @@ class IndicSentenceSplitter:
         return sentences
 
 
-# ============================================================================
-# CHUNKING STRATEGY PATTERN IMPLEMENTATIONS
-# ============================================================================
-
 class BaseChunker(ABC):
-    """Abstract Strategy Interface for passage chunking."""
-    
     @abstractmethod
     def chunk(self, parent_text: str, parent_id: str, query_id: str, is_selected: bool = True) -> List[ChunkPayload]:
         pass
 
 
 class HierarchicalParentChildChunker(BaseChunker):
-    """
-    Strategy A: Hierarchical Parent-Child Chunking
-    ----------------------------------------------
-    Splits parent passage into fine-grained sentence chunks (child vectors)
-    while storing the complete original passage as parent context in the payload.
-    """
-
     def __init__(self, min_chunk_chars: int = 15):
         self.min_chunk_chars = min_chunk_chars
 
@@ -193,13 +154,6 @@ class HierarchicalParentChildChunker(BaseChunker):
 
 
 class SlidingWindowChunker(BaseChunker):
-    """
-    Strategy B: Sliding Window with Overlap Chunking
-    ------------------------------------------------
-    Groups N sentences together with an overlapping step (e.g., 2 sentences, 1 overlap).
-    Preserves continuous narrative and discourse coherence across sentence splits.
-    """
-
     def __init__(self, window_size: int = 2, overlap: int = 1, min_chunk_chars: int = 15):
         self.window_size = max(1, window_size)
         self.overlap = max(0, min(overlap, self.window_size - 1))
@@ -261,50 +215,26 @@ class SlidingWindowChunker(BaseChunker):
         return chunks
 
 
-# ============================================================================
-# DATASET STREAMING & INGESTION MANAGER
-# ============================================================================
-
 class IndicDatasetLoader:
-    """Handles high-performance streaming & loading of MSMARCO-XI Hindi parquet files."""
-
     @staticmethod
     def get_parquet_path(split: str = "validation") -> str:
-        """Retrieves or downloads the parquet file from HuggingFace Hub cache."""
         from huggingface_hub import hf_hub_download
-        
         filename = "validation/hinval.parquet" if split in ["val", "validation"] else "train/hintrain.parquet"
-        logger.info(f"Locating dataset file '{filename}' from 'ai4bharat/MSMARCO-XI'...")
-        
+        logger.info(f"Locating dataset file '{filename}'...")
         cached_file = hf_hub_download(
             repo_id="ai4bharat/MSMARCO-XI",
             filename=filename,
             repo_type="dataset"
         )
-        logger.info(f"Dataset path ready: {cached_file}")
         return cached_file
 
     @classmethod
     def iterate_samples(cls, split: str = "validation", max_samples: int = 100,
                         batch_size: int = 1000) -> Generator[Dict[str, Any], None, None]:
-        """
-        Streams dataset rows in fixed-size batches.
-
-        The previous implementation called read_row_group(0), and hinval.parquet
-        stores all 97,941 rows in a SINGLE row group -- so it materialised the
-        entire 441MB file (well over 1GB once expanded into pandas) no matter how
-        small --sample-limit was. That was the out-of-memory crash. iter_batches
-        holds `batch_size` rows at a time and nothing more.
-        """
         import pyarrow.parquet as pq
 
         parquet_path = cls.get_parquet_path(split=split)
         pf = pq.ParquetFile(parquet_path)
-        logger.info(f"Parquet opened: {pf.metadata.num_rows:,} rows in {pf.num_row_groups} "
-                    f"row group(s); streaming {batch_size} rows at a time.")
-
-        # Only the columns actually used -- avoids decoding English_passages and
-        # the meta struct for every row.
         columns = ["query_id", "query", "query_type", "Answer", "passages"]
 
         yielded = 0
@@ -316,15 +246,7 @@ class IndicDatasetLoader:
                     return
 
 
-# ============================================================================
-# RAG INDEXER
-# ============================================================================
-
 class IndicRAGIndexer:
-    """
-    Orchestrates embedding generation and batch insertion into Qdrant vector database.
-    """
-
     def __init__(self, config: IngestConfig, client=None):
         self.config = config
 
@@ -332,34 +254,26 @@ class IndicRAGIndexer:
             from fastembed import TextEmbedding
             from qdrant_client import QdrantClient, models
         except ImportError as e:
-            logger.error(f"Required library missing: {e}. Please run: pip install -r requirements.txt")
+            logger.error(f"Missing library: {e}")
             sys.exit(1)
 
         self._models = models
-
-        # Derived from the model name so ingestion and retrieval can never drift
-        # apart. See retriever.prefixes_for_model for why this matters.
         from retriever import prefixes_for_model
         self.query_prefix, self.passage_prefix = prefixes_for_model(self.config.embedding_model)
-        logger.info(f"Embedding prefixes: query={self.query_prefix!r} passage={self.passage_prefix!r}")
 
         logger.info(f"Loading FastEmbed model '{self.config.embedding_model}'...")
         t0 = time.perf_counter()
         self.embed_model = TextEmbedding(model_name=self.config.embedding_model)
-        
-        # Determine embedding dimension by testing a single probe vector
         probe_emb = list(self.embed_model.embed(["probe"]))[0]
         self.config.embedding_dim = len(probe_emb)
-        logger.info(f"Model loaded in {(time.perf_counter() - t0):.2f}s | Vector Dimension: {self.config.embedding_dim}")
+        logger.info(f"Model loaded in {(time.perf_counter() - t0):.2f}s | Dim: {self.config.embedding_dim}")
 
         if client is not None:
             self.client = client
         else:
-            logger.info(f"Connecting to local Qdrant vector store at '{self.config.qdrant_path}'...")
             os.makedirs(self.config.qdrant_path, exist_ok=True)
             self.client = QdrantClient(path=self.config.qdrant_path)
 
-        # Setup chunking strategies
         self.chunkers: List[BaseChunker] = []
         if self.config.strategy in ["parent_child", "all"]:
             self.chunkers.append(HierarchicalParentChildChunker(min_chunk_chars=self.config.min_chunk_chars))
@@ -373,17 +287,15 @@ class IndicRAGIndexer:
             )
 
     def init_collection(self, recreate: bool = False) -> None:
-        """Initializes or resets the target Qdrant collection."""
         exists = self.client.collection_exists(self.config.collection_name)
         if exists:
             if recreate:
-                logger.warning(f"Recreating collection '{self.config.collection_name}' (dropping existing)...")
+                logger.warning(f"Recreating collection '{self.config.collection_name}'...")
                 self.client.delete_collection(self.config.collection_name)
             else:
-                logger.info(f"Collection '{self.config.collection_name}' exists. New vectors will be added.")
+                logger.info(f"Collection '{self.config.collection_name}' exists.")
                 return
 
-        logger.info(f"Creating collection '{self.config.collection_name}' (Dim={self.config.embedding_dim}, Distance=Cosine)...")
         self.client.create_collection(
             collection_name=self.config.collection_name,
             vectors_config=self._models.VectorParams(
@@ -398,17 +310,14 @@ class IndicRAGIndexer:
             )
         )
 
-        # Create indexing on payload fields for instant filtering
         for field in ["strategy", "parent_id", "query_id", "is_selected_passage"]:
             self.client.create_payload_index(
                 collection_name=self.config.collection_name,
                 field_name=field,
                 field_schema=self._models.PayloadSchemaType.KEYWORD
             )
-        logger.info("Collection and fast payload indexes configured successfully.")
 
     def run_ingestion(self) -> int:
-        """Runs the streaming chunking, embedding, and indexing loop."""
         from tqdm import tqdm
 
         total_limit = self.config.sample_limit if self.config.sample_limit > 0 else 97941
@@ -422,9 +331,6 @@ class IndicRAGIndexer:
             if not buffer:
                 return 0
             
-            # Prefix is model-dependent, never unconditional: E5 is trained with
-            # "query: "/"passage: " markers, MiniLM and BGE are not. Applying E5
-            # prefixes to a MiniLM index degrades every subsequent search.
             texts = [f"{self.passage_prefix}{c.chunk_text}" for c in buffer]
             embeddings = list(self.embed_model.embed(texts, batch_size=self.config.embedding_batch_size))
             
@@ -475,8 +381,6 @@ class IndicRAGIndexer:
                         continue
                     
                     is_sel = bool(is_selected_flags[p_idx]) if p_idx < len(is_selected_flags) else True
-                    
-                    # By default index selected (positive) passages; if index_all_passages=True, index all distractors too
                     if not self.config.index_all_passages and not is_sel:
                         continue
 
@@ -499,18 +403,14 @@ class IndicRAGIndexer:
                 pbar.update(1)
 
         except KeyboardInterrupt:
-            logger.warning("Ingestion interrupted by user! Flushing active buffer...")
+            logger.warning("Interrupted by user, flushing buffer...")
         finally:
             total_indexed += flush_buffer(chunk_buffer)
             pbar.close()
 
-        logger.info(f"Ingestion finished: {sample_count} dataset queries, {total_passages_processed} parent passages -> {total_indexed} indexed vector points in Qdrant.")
+        logger.info(f"Ingestion finished: {sample_count} queries -> {total_indexed} points.")
         return total_indexed
 
-
-# ============================================================================
-# RETRIEVAL SANITY CHECK & LATENCY BENCHMARK
-# ============================================================================
 
 def benchmark_retrieval(
     indexer: IndicRAGIndexer,
@@ -518,10 +418,6 @@ def benchmark_retrieval(
     top_k: int = 3,
     num_iterations: int = 10
 ) -> Dict[str, Any]:
-    """
-    Measures end-to-end vector retrieval latency + parent context resolution.
-    Calculates P50, P70, P90, P100 percentiles against the <200ms target budget.
-    """
     if not test_queries:
         test_queries = [
             "कॉर्पोरेशन क्या है?",
@@ -531,15 +427,11 @@ def benchmark_retrieval(
             "भारत की राजधानी क्या है?"
         ]
 
-    logger.info("\n" + "=" * 70)
-    logger.info(f"RUNNING RETRIEVAL BENCHMARK ({len(test_queries)} queries, {num_iterations} iterations each)")
-    logger.info("=" * 70)
-
+    logger.info("RUNNING RETRIEVAL BENCHMARK")
     collection_info = indexer.client.get_collection(indexer.config.collection_name)
-    logger.info(f"Collection: '{indexer.config.collection_name}' | Indexed Vectors: {collection_info.points_count}")
 
     if collection_info.points_count == 0:
-        logger.warning("No vectors found in collection. Ingest samples first.")
+        logger.warning("No vectors found in collection.")
         return {}
 
     all_latencies_ms: List[float] = []
@@ -549,10 +441,8 @@ def benchmark_retrieval(
         for it in range(num_iterations):
             t0 = time.perf_counter()
 
-            # 1. Generate query vector (prefix is model-derived, see __init__)
             query_emb = list(indexer.embed_model.embed([f"{indexer.query_prefix}{query}"]))[0].tolist()
 
-            # 2. Query Qdrant vector store
             search_results = indexer.client.query_points(
                 collection_name=indexer.config.collection_name,
                 query=query_emb,
@@ -560,7 +450,6 @@ def benchmark_retrieval(
                 with_payload=True
             ).points
 
-            # 3. Resolve parent contexts (Parent-Child Resolution)
             resolved_hits = []
             for hit in search_results:
                 payload = hit.payload or {}
@@ -591,30 +480,7 @@ def benchmark_retrieval(
     p100 = float(np.percentile(all_latencies_ms, 100))
     mean_lat = float(np.mean(all_latencies_ms))
 
-    logger.info("\n" + "-" * 50)
-    logger.info("RETRIEVAL & RESOLUTION LATENCY ANALYTICS (ms)")
-    logger.info("-" * 50)
-    logger.info(f"Total Query Iterations : {len(all_latencies_ms)}")
-    logger.info(f"Mean Latency           : {mean_lat:.2f} ms")
-    logger.info(f"P50 Latency (Median)   : {p50:.2f} ms")
-    logger.info(f"P70 Latency            : {p70:.2f} ms")
-    logger.info(f"P90 Latency            : {p90:.2f} ms")
-    logger.info(f"P100 Latency (Max)     : {p100:.2f} ms")
-    logger.info(f"Target Budget (<200ms) : {'PASSED [OK]' if p100 < 200 else 'NEEDS OPTIMIZATION'}")
-    logger.info("-" * 50)
-
-    logger.info("\n--- SAMPLE PARENT-CHILD RETRIEVAL DEMO ---")
-    for sample in sample_retrievals:
-        logger.info(f"\nQuery: \"{sample['query']}\" (Search + Parent Resolution: {sample['latency_ms']:.2f}ms)")
-        for rank, hit in enumerate(sample["hits"], 1):
-            chunk_display = (hit['chunk_text'][:90] + '...') if len(hit['chunk_text'] or '') > 90 else hit['chunk_text']
-            parent_display = (hit['parent_text'][:130] + '...') if len(hit['parent_text'] or '') > 130 else hit['parent_text']
-            logger.info(f"  Rank #{rank} [Cosine Similarity: {hit['score']:.4f} | Strategy: {hit['strategy']}]")
-            logger.info(f"    - Matched Child Chunk  : \"{chunk_display}\"")
-            logger.info(f"    - Resolved Parent Context : \"{parent_display}\"")
-            logger.info(f"    - Parent ID: {hit['parent_id']} (Segment {hit['chunk_index'] + 1}/{hit['total_chunks']})")
-
-    logger.info("\n" + "=" * 70)
+    logger.info(f"Mean Latency : {mean_lat:.2f} ms | P50: {p50:.2f} ms | P70: {p70:.2f} ms | P100: {p100:.2f} ms")
 
     return {
         "mean_ms": mean_lat,
@@ -626,80 +492,19 @@ def benchmark_retrieval(
     }
 
 
-# ============================================================================
-# CLI ENTRYPOINT
-# ============================================================================
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Production-Grade Indic RAG Ingestion & Indexing Pipeline (MSMARCO-XI Hindi)"
-    )
-    parser.add_argument(
-        "--sample-limit",
-        type=int,
-        default=100,
-        help="Number of dataset samples to ingest (default: 100, set to 0 for full dataset)."
-    )
-    parser.add_argument(
-        "--strategy",
-        type=str,
-        choices=["parent_child", "sliding_window", "all"],
-        default="all",
-        help="Chunking strategy: 'parent_child', 'sliding_window', or 'all' (default: 'all')."
-    )
-    parser.add_argument(
-        "--collection",
-        type=str,
-        default="indic_rag_msmarco_hi",
-        help="Qdrant collection name (default: 'indic_rag_msmarco_hi')."
-    )
-    parser.add_argument(
-        "--qdrant-path",
-        type=str,
-        default="./qdrant_data",
-        help="Local on-disk Qdrant storage path (default: './qdrant_data')."
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="intfloat/multilingual-e5-large",
-        help="FastEmbed embedding model name."
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="validation",
-        choices=["validation", "train"],
-        help="Dataset split to ingest from: 'validation' or 'train'."
-    )
-    parser.add_argument(
-        "--index-all-passages",
-        action="store_true",
-        help="Index all passages (including negative distractors), not just positive selected passages."
-    )
-    parser.add_argument(
-        "--recreate-collection",
-        action="store_true",
-        help="Drop and recreate the collection before ingesting."
-    )
-    parser.add_argument(
-        "--skip-ingest",
-        action="store_true",
-        help="Skip ingestion and immediately run retrieval benchmark on existing index."
-    )
-    parser.add_argument(
-        "--window-sentences",
-        type=int,
-        default=2,
-        help="Window size in sentences for sliding-window chunking (default: 2)."
-    )
-    parser.add_argument(
-        "--overlap-sentences",
-        type=int,
-        default=1,
-        help="Sentence overlap for sliding-window chunking (default: 1)."
-    )
-
+    parser = argparse.ArgumentParser(description="Indic RAG Ingestion & Indexing Pipeline")
+    parser.add_argument("--sample-limit", type=int, default=100)
+    parser.add_argument("--strategy", type=str, choices=["parent_child", "sliding_window", "all"], default="all")
+    parser.add_argument("--collection", type=str, default="indic_rag_msmarco_hi")
+    parser.add_argument("--qdrant-path", type=str, default="./qdrant_data")
+    parser.add_argument("--model", type=str, default="intfloat/multilingual-e5-large")
+    parser.add_argument("--split", type=str, default="validation", choices=["validation", "train"])
+    parser.add_argument("--index-all-passages", action="store_true")
+    parser.add_argument("--recreate-collection", action="store_true")
+    parser.add_argument("--skip-ingest", action="store_true")
+    parser.add_argument("--window-sentences", type=int, default=2)
+    parser.add_argument("--overlap-sentences", type=int, default=1)
     return parser.parse_args()
 
 
@@ -718,30 +523,15 @@ def main():
         index_all_passages=args.index_all_passages
     )
 
-    logger.info("=" * 70)
-    logger.info("INDIC VOICE RAG INGESTION & INDEXING PIPELINE")
-    logger.info(f"Target Collection   : {config.collection_name}")
-    logger.info(f"Qdrant Path         : {config.qdrant_path}")
-    logger.info(f"Embedding Model     : {config.embedding_model}")
-    logger.info(f"Chunking Strategy   : {config.strategy}")
-    logger.info(f"Dataset Split       : {config.dataset_split}")
-    logger.info(f"Sample Limit        : {config.sample_limit}")
-    logger.info("=" * 70)
-
-    # Initialize Indexer
     indexer = IndicRAGIndexer(config)
 
-    # Ingestion Phase
     if not args.skip_ingest:
         indexer.init_collection(recreate=args.recreate_collection)
         t_start = time.perf_counter()
         indexed_count = indexer.run_ingestion()
         t_total = time.perf_counter() - t_start
-        logger.info(f"Total Ingestion & Indexing time: {t_total:.2f}s ({indexed_count} vector points)")
-    else:
-        logger.info("Skipping ingestion phase (--skip-ingest flag provided).")
+        logger.info(f"Ingestion time: {t_total:.2f}s ({indexed_count} points)")
 
-    # Retrieval Sanity Check & Latency Benchmark Phase
     benchmark_retrieval(indexer)
 
 

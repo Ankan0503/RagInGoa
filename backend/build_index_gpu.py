@@ -73,93 +73,50 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | 
 logger = logging.getLogger("IndexBuilder")
 
 
-# ============================================================================
-# CONFIG  -- the only block you normally edit
-# ============================================================================
-
 @dataclass
 class BuildConfig:
-    # --- corpus size (CUMULATIVE: total queries the index should cover) ---
-    # Raise this and re-run to extend. Measured sizing for this dataset:
-    #   10_000 queries ->  ~98k passages ->  ~360k vectors -> ~140MB int8 + ~80MB text
-    #   20_000 queries -> ~197k passages ->  ~720k vectors -> ~280MB int8 + ~160MB text
-    #   50_000 queries -> ~492k passages -> ~1.8M vectors  -> ~690MB int8 + ~400MB text
-    #   97_941 queries -> ~963k passages -> ~3.5M vectors  -> ~1.4GB int8 + ~780MB text
-    # NOTE: the validation split has 97,941 queries total. Asking for more than
-    # that simply stops at the end of the file.
     num_queries: int = 20_000
     split: str = "validation"
 
-    # --- embedding model ---
-    # multilingual-e5-small: 384-dim, retrieval-trained, ONNX available for CPU serving.
-    # Changing this invalidates the whole index -- the fingerprint check will catch it.
     model_name: str = "intfloat/multilingual-e5-small"
     embed_dim: int = 384
-    query_prefix: str = "query: "      # E5 asymmetric convention
+    query_prefix: str = "query: "
     passage_prefix: str = "passage: "
     gpu_batch_size: int = 256
-    max_seq_length: int = 320          # p99 passage is 705 chars; 320 tokens covers it
+    max_seq_length: int = 320
 
-    # --- chunking ---
     min_chunk_chars: int = 20
-    atomic_max_sentences: int = 2      # <= this -> passage vector only
-    sentence_max_sentences: int = 6    # <= this -> passage + sentence children
+    atomic_max_sentences: int = 2
+    sentence_max_sentences: int = 6
     window_size: int = 3
     window_overlap: int = 1
-    semantic_percentile: int = 25      # lower = fewer, larger semantic chunks
+    semantic_percentile: int = 25
 
-    # --- storage ---
-    # A REAL Qdrant server, not qdrant-client's local file mode. Local mode is
-    # documented for <20,000 points and does brute-force numpy search -- at 720k
-    # vectors that is a linear scan on every query and the 200ms budget is gone.
-    # A server builds an actual HNSW index, so search stays in single-digit ms.
-    # On Kaggle/Colab the binary is downloaded and launched automatically.
     qdrant_url: str = "http://127.0.0.1:6333"
     auto_start_server: bool = True
-    qdrant_version: str = "v1.12.4"      # must match the version you deploy with
+    qdrant_version: str = "v1.12.4"
     server_storage: str = "./qdrant_storage"
     snapshot_dir: str = "./snapshots"
 
     collection: str = "indic_rag_msmarco_hi"
-    qdrant_path: str = "./qdrant_data"   # only used if auto_start_server=False
+    qdrant_path: str = "./qdrant_data"
     parent_db: str = "./parents.sqlite"
     manifest_path: str = "./index_manifest.json"
-    # Local-mode Qdrant persists through sqlite, and transaction overhead dominates
-    # the whole build -- the GPU sits at 0% waiting on it. Larger batches mean
-    # fewer commits. Not part of the config fingerprint: batch size cannot change
-    # what a vector is, so raising it never invalidates an existing index.
     upsert_batch: int = 4096
-    enable_bm25: bool = True           # hybrid sparse retrieval
-    enable_int8: bool = True           # ~4x smaller vectors, faster search
+    enable_bm25: bool = True
+    enable_int8: bool = True
 
-    # --- incremental behaviour ---
-    # resume=True  : extend an existing index, skipping queries already done.
-    # resume=False : delete and rebuild from scratch.
     resume: bool = True
-    checkpoint_every: int = 2_000      # queries between durable checkpoints
+    checkpoint_every: int = 2_000
 
-    # --- misc ---
-    stream_batch: int = 1_000          # parquet rows pulled at a time (memory safe)
-    verify_parity: bool = True         # check GPU vectors == CPU serving vectors
+    stream_batch: int = 1_000
+    verify_parity: bool = True
 
 
 CFG = BuildConfig()
 
 
-# ============================================================================
-# CONFIG FINGERPRINT
-# ============================================================================
-
 def config_fingerprint(cfg: BuildConfig) -> str:
-    """
-    Hash of every setting that changes what a stored vector MEANS.
-
-    num_queries is deliberately excluded -- extending the corpus is the whole
-    point of resuming. Everything else is included, because appending vectors
-    produced under different settings to the same collection yields an index
-    where half the points are incomparable to the other half, and no error is
-    ever raised.
-    """
     payload = {
         "model": cfg.model_name,
         "dim": cfg.embed_dim,
@@ -181,20 +138,7 @@ def config_fingerprint(cfg: BuildConfig) -> str:
     return hashlib.blake2b(blob, digest_size=12).hexdigest()
 
 
-# ============================================================================
-# INDIC SENTENCE SEGMENTATION
-# ============================================================================
-
 class IndicSentenceSplitter:
-    """
-    Splits Devanagari text on danda / double-danda / western terminators.
-
-    Improvements over the naive version:
-      - does not split inside decimals (1.5) or common abbreviations
-      - never emits a fragment shorter than min_chars; fragments are glued to the
-        previous sentence instead of being dropped (dropping loses facts)
-    """
-
     _BOUNDARY = re.compile(r'([।॥?!]+|(?<![0-9])\.(?![0-9])|\n+)')
     _WS = re.compile(r'[ \t\r ]+')
 
@@ -231,35 +175,17 @@ class IndicSentenceSplitter:
         return out or [text]
 
 
-# ============================================================================
-# CHUNK RECORD
-# ============================================================================
-
 @dataclass
 class Chunk:
-    text: str            # what actually gets embedded (may carry a context prefix)
-    raw_text: str        # the literal span, for display / citation
+    text: str
+    raw_text: str
     strategy: str
     parent_id: str
     chunk_index: int
     n_chunks: int
 
 
-# ============================================================================
-# LENGTH-ADAPTIVE CHUNKER
-# ============================================================================
-
 class AdaptiveChunker:
-    """
-    Routes each passage to the strategy that suits its length.
-
-    The context prefix on sentence chunks is the key quality trick: an isolated
-    Hindi sentence like "यह 1998 में स्थापित हुआ था।" is meaningless on its own.
-    Prefixing the passage's opening clause restores the subject, so the vector
-    lands near queries about the actual entity instead of near every date sentence
-    in the corpus.
-    """
-
     def __init__(self, cfg: BuildConfig):
         self.cfg = cfg
 
@@ -277,7 +203,7 @@ class AdaptiveChunker:
         n = len(sentences)
         out = []
         for i, s in enumerate(sentences):
-            embed_text = s if i == 0 else f"{ctx} {s}"   # first sentence is its own context
+            embed_text = s if i == 0 else f"{ctx} {s}"
             out.append(Chunk(text=embed_text, raw_text=s, strategy="sentence",
                              parent_id=parent_id, chunk_index=i, n_chunks=n))
         return out
@@ -303,10 +229,6 @@ class AdaptiveChunker:
 
     def _semantic_chunks(self, sentences: List[str], parent_id: str,
                          sent_vecs: np.ndarray) -> List[Chunk]:
-        """
-        Boundary detection: cosine similarity between neighbouring sentences.
-        Where similarity dips below the Nth percentile, the topic shifted -> cut.
-        """
         if len(sentences) < 3:
             return []
 
@@ -331,11 +253,6 @@ class AdaptiveChunker:
                 for i, g in enumerate(groups)]
 
     def plan(self, passage: str, parent_id: str) -> Tuple[List[Chunk], List[str], bool]:
-        """
-        Returns (chunks, sentences, needs_semantic). Semantic chunking is resolved
-        in a second pass because it needs sentence vectors, which are batched on
-        the GPU rather than computed per-passage.
-        """
         sents = IndicSentenceSplitter.split(passage, self.cfg.min_chunk_chars)
         chunks: List[Chunk] = [self._passage_chunk(passage, parent_id)]
 
@@ -351,21 +268,8 @@ class AdaptiveChunker:
         return chunks, sents, True
 
 
-# ============================================================================
-# DATASET STREAMING  (memory-safe: never materialises the whole parquet)
-# ============================================================================
-
 def stream_rows(split: str, limit: int, batch_size: int,
                 skip: int = 0) -> Iterator[Dict[str, Any]]:
-    """
-    Yields rows [skip, limit). Skipping is done at the Arrow batch level, so
-    resuming past 20,000 queries does not decode 20,000 rows of passage text --
-    whole batches are discarded by counter before to_pylist() is ever called.
-
-    The naive version called read_row_group(0), and this parquet has ONE row
-    group holding all 97,941 rows -- so it pulled 441MB into pandas no matter how
-    small the limit was. That was the crash. iter_batches streams instead.
-    """
     import pyarrow.parquet as pq
     from huggingface_hub import hf_hub_download
 
@@ -376,16 +280,13 @@ def stream_rows(split: str, limit: int, batch_size: int,
     pf = pq.ParquetFile(path)
     total = pf.metadata.num_rows
     if limit > total:
-        logger.warning(f"Requested {limit:,} queries but the {split} split holds only "
-                       f"{total:,}. Will stop at {total:,}.")
+        logger.warning(f"Requested {limit:,} queries but the split has only {total:,}.")
     logger.info(f"Parquet ready: {total:,} rows | skipping {skip:,} | target {min(limit, total):,}")
 
     cols = ["query_id", "query", "query_type", "Answer", "passages"]
     seen = 0
     for batch in pf.iter_batches(batch_size=batch_size, columns=cols):
         n = batch.num_rows
-
-        # Whole batch already processed in a previous run -- drop without decoding.
         if seen + n <= skip:
             seen += n
             continue
@@ -398,19 +299,8 @@ def stream_rows(split: str, limit: int, batch_size: int,
                 return
 
 
-# ============================================================================
-# QDRANT SERVER BOOTSTRAP  (Kaggle / Colab have no docker, so run the binary)
-# ============================================================================
-
 def ensure_qdrant_server(url: str, storage: str, version: str,
                          timeout_s: int = 90) -> Optional[Any]:
-    """
-    Returns the subprocess handle if this call started the server, else None.
-
-    Kaggle and Colab cannot run `docker run qdrant/qdrant`, so the release binary
-    is fetched and launched directly. If something is already listening on `url`
-    it is reused untouched.
-    """
     import subprocess, urllib.request, urllib.error, tarfile, shutil
 
     def responding() -> bool:
@@ -437,16 +327,7 @@ def ensure_qdrant_server(url: str, storage: str, version: str,
                 t.extractall("./qdrant_bin")
             os.chmod(binary, 0o755)
         except Exception as e:
-            raise SystemExit(
-                "\n".join([
-                    "",
-                    f"Could not fetch the Qdrant binary: {e}",
-                    "Either provide a reachable server via CFG.qdrant_url, or set",
-                    "CFG.auto_start_server = False to fall back to local file mode",
-                    "(only viable below ~20,000 points).",
-                    "",
-                ])
-            )
+            raise SystemExit(f"Could not fetch Qdrant binary: {e}")
 
     os.makedirs(storage, exist_ok=True)
     env = dict(os.environ, QDRANT__STORAGE__STORAGE_PATH=os.path.abspath(storage))
@@ -459,29 +340,14 @@ def ensure_qdrant_server(url: str, storage: str, version: str,
             logger.info(f"Qdrant ready at {url}")
             return proc
         if proc.poll() is not None:
-            raise SystemExit("Qdrant exited during startup — check the binary and storage path.")
+            raise SystemExit("Qdrant exited during startup.")
         time.sleep(1)
 
     proc.terminate()
     raise SystemExit(f"Qdrant did not become ready within {timeout_s}s.")
 
 
-# ============================================================================
-# PARENT STORE  (passage text lives here ONCE, not on every child vector)
-# ============================================================================
-
 class ParentStore:
-    """
-    The naive index copied the full parent_text onto every child point. With
-    ~3.7 vectors per passage that is a ~3.7x blowup of the largest field in the
-    payload -- measured at ~5.5KB per point. Here the text lives in one sqlite
-    row and child vectors carry only parent_id. Lookup is a primary-key hit
-    (~50 microseconds), so retrieval latency is unaffected.
-
-    passage_hash is stored so that a resumed run can rebuild the dedup set
-    without re-reading the corpus.
-    """
-
     SCHEMA = """
         CREATE TABLE IF NOT EXISTS parents (
             parent_id    TEXT PRIMARY KEY,
@@ -507,7 +373,6 @@ class ParentStore:
         self._buf: List[Tuple] = []
 
     def load_hashes(self) -> Set[bytes]:
-        """Rebuild the dedup set from disk so a resumed run does not re-add passages."""
         rows = self.conn.execute(
             "SELECT passage_hash FROM parents WHERE passage_hash IS NOT NULL")
         return {bytes.fromhex(r[0]) for r in rows}
@@ -541,12 +406,7 @@ class ParentStore:
         return n
 
 
-# ============================================================================
-# BUILDER
-# ============================================================================
-
 class IndexBuilder:
-
     def __init__(self, cfg: BuildConfig):
         self.cfg = cfg
         self.chunker = AdaptiveChunker(cfg)
@@ -560,11 +420,8 @@ class IndexBuilder:
         self.resuming = False
         self.start_query = 0
         self.next_point_id = 0
-        # Set here (not in run) so _plan_run works when called standalone.
         self.use_server = bool(cfg.auto_start_server or cfg.qdrant_url)
         self._server_proc = None
-
-    # ------------------------------------------------------------- planning
 
     def _read_manifest(self) -> Optional[Dict[str, Any]]:
         if not os.path.exists(self.cfg.manifest_path):
@@ -573,14 +430,10 @@ class IndexBuilder:
             with open(self.cfg.manifest_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            logger.warning(f"Existing manifest is unreadable ({e}); treating as absent.")
+            logger.warning(f"Existing manifest unreadable: {e}")
             return None
 
     def _plan_run(self):
-        """
-        Decide between fresh build, resume, and refuse. Runs before the model is
-        loaded so a mistake fails in seconds rather than after a 2 minute download.
-        """
         store = self.cfg.server_storage if self.use_server else self.cfg.qdrant_path
         index_exists = os.path.isdir(store) and bool(os.listdir(store))
         manifest = self._read_manifest()
@@ -590,47 +443,23 @@ class IndexBuilder:
             return
 
         if not self.cfg.resume:
-            size = sum(os.path.getsize(os.path.join(dp, f))
-                       for dp, _, fs in os.walk(store) for f in fs)
-            logger.warning("=" * 74)
-            logger.warning(f"resume=False -- DELETING the existing index at "
-                           f"{store} ({size/1e6:,.1f} MB) and rebuilding.")
-            logger.warning("Set CFG.resume = True to extend it instead.")
-            logger.warning("=" * 74)
-            logger.warning("Deleting in 5 seconds. Ctrl-C to abort.")
-            try:
-                time.sleep(5)
-            except KeyboardInterrupt:
-                raise SystemExit("\nAborted by user. Nothing was deleted.\n")
+            logger.warning(f"resume=False -- deleting existing index at {store}.")
             return
 
         if manifest is None:
             raise SystemExit(
-                f"\nAborted: an index exists at {store} but there is no\n"
-                f"{self.cfg.manifest_path} describing it, so it cannot be safely extended.\n"
-                f"Set CFG.resume = False to rebuild from scratch, or restore the manifest.\n"
+                f"\nAborted: index exists at {store} without {self.cfg.manifest_path}.\n"
             )
 
         old_fp = manifest.get("config_fingerprint")
         if old_fp != self.fingerprint:
             raise SystemExit(
-                f"\nAborted: configuration has changed since the existing index was built.\n"
-                f"  existing fingerprint : {old_fp}\n"
-                f"  current  fingerprint : {self.fingerprint}\n"
-                f"  existing model       : {manifest.get('model_name')}\n"
-                f"  current  model       : {self.cfg.model_name}\n\n"
-                f"Appending vectors built under different settings to the same collection\n"
-                f"produces an index where the new points are not comparable to the old ones,\n"
-                f"and nothing would raise at query time -- searches would just be wrong.\n\n"
-                f"Either restore the original settings, or set CFG.resume = False to rebuild.\n"
+                f"\nAborted: config fingerprint changed ({old_fp} vs {self.fingerprint}).\n"
             )
 
         done = int(manifest.get("queries_done", 0))
         if done >= self.cfg.num_queries:
-            raise SystemExit(
-                f"\nNothing to do: the index already covers {done:,} queries and\n"
-                f"num_queries is {self.cfg.num_queries:,}. Raise num_queries to extend it.\n"
-            )
+            raise SystemExit(f"\nIndex already covers {done:,} queries >= {self.cfg.num_queries:,}.\n")
 
         self.resuming = True
         self.start_query = done
@@ -643,14 +472,7 @@ class IndexBuilder:
                 if k in self.stats[group]:
                     self.stats[group][k] = int(v)
 
-        logger.info("=" * 74)
-        logger.info(f"RESUMING: {done:,} queries already indexed "
-                    f"({self.stats['vectors']:,} vectors, {self.stats['passages_unique']:,} passages)")
-        logger.info(f"This run will process queries {done:,} -> {self.cfg.num_queries:,} "
-                    f"({self.cfg.num_queries - done:,} new)")
-        logger.info("=" * 74)
-
-    # ---------------------------------------------------------------- model
+        logger.info(f"RESUMING: {done:,} queries already indexed.")
 
     def _load_encoder(self):
         import torch
@@ -661,7 +483,7 @@ class IndexBuilder:
         m = SentenceTransformer(self.cfg.model_name, device=device)
         m.max_seq_length = self.cfg.max_seq_length
         if device == "cuda":
-            m = m.half()   # fp16: ~2x throughput, cosine-identical to 4 decimals
+            m = m.half()
         logger.info(f"Encoder ready | dim={m.get_sentence_embedding_dimension()} | device={device}")
         return m, device
 
@@ -669,26 +491,19 @@ class IndexBuilder:
         vecs = self.model.encode(
             [prefix + t for t in texts],
             batch_size=self.cfg.gpu_batch_size,
-            normalize_embeddings=True,      # cosine == dot product afterwards
+            normalize_embeddings=True,
             convert_to_numpy=True,
             show_progress_bar=False,
         )
         return vecs.astype(np.float32)
 
-    # --------------------------------------------------------------- qdrant
-
     def _init_qdrant(self):
         from qdrant_client import QdrantClient, models
-
         self.models = models
 
         if self.use_server:
-            # Server mode. Storage is managed by the Qdrant process; a fresh build
-            # drops the collection through the API rather than deleting files
-            # underneath a running server.
             client = QdrantClient(url=self.cfg.qdrant_url, prefer_grpc=False, timeout=60)
             if not self.resuming and client.collection_exists(self.cfg.collection):
-                logger.warning(f"Dropping existing collection '{self.cfg.collection}'")
                 client.delete_collection(self.cfg.collection)
         else:
             if not self.resuming and os.path.exists(self.cfg.qdrant_path):
@@ -699,15 +514,11 @@ class IndexBuilder:
 
         if self.resuming and client.collection_exists(self.cfg.collection):
             info = client.get_collection(self.cfg.collection)
-            logger.info(f"Reopened collection '{self.cfg.collection}' "
-                        f"({info.points_count:,} existing points)")
+            logger.info(f"Reopened collection '{self.cfg.collection}' ({info.points_count:,} points)")
             return client
 
         quant = None
         if self.cfg.enable_int8:
-            # int8 scalar quantization: 384 floats (1536B) -> 384 bytes.
-            # always_ram keeps the compressed vectors hot; originals stay on disk
-            # and are only touched when rescoring.
             quant = models.ScalarQuantization(
                 scalar=models.ScalarQuantizationConfig(
                     type=models.ScalarType.INT8, quantile=0.99, always_ram=True))
@@ -733,21 +544,13 @@ class IndexBuilder:
             collection_name=self.cfg.collection, field_name="is_selected",
             field_schema=models.PayloadSchemaType.INTEGER)
 
-        logger.info(f"Collection '{self.cfg.collection}' created "
-                    f"(int8={self.cfg.enable_int8}, bm25={self.cfg.enable_bm25})")
         return client
 
     def _init_bm25(self):
         if not self.cfg.enable_bm25:
             return None
         from fastembed import SparseTextEmbedding
-        # No Hindi stemmer exists in snowball, so stemming is disabled and we rely
-        # on whitespace tokenisation. Devanagari is not heavily inflected at the
-        # token level for these queries, so this is fine.
-        logger.info("Loading BM25 sparse encoder (stemmer disabled for Devanagari) ...")
         return SparseTextEmbedding(model_name="Qdrant/bm25", disable_stemmer=True)
-
-    # ------------------------------------------------------------- manifest
 
     def _write_manifest(self, queries_done: int, n_parents: int, final: bool = False):
         manifest = {
@@ -761,8 +564,6 @@ class IndexBuilder:
             "int8_quantized": self.cfg.enable_int8,
             "parent_db": os.path.basename(self.cfg.parent_db),
             "config_fingerprint": self.fingerprint,
-            # The serving side must use the same transport: server storage and
-            # local-mode storage are different formats, not interchangeable.
             "transport": "server" if self.use_server else "local",
             "qdrant_version": self.cfg.qdrant_version if self.use_server else None,
             "split": self.cfg.split,
@@ -775,9 +576,7 @@ class IndexBuilder:
         tmp = self.cfg.manifest_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.cfg.manifest_path)   # atomic: never a half-written manifest
-
-    # ------------------------------------------------------------- main loop
+        os.replace(tmp, self.cfg.manifest_path)
 
     def run(self):
         t0 = time.perf_counter()
@@ -795,23 +594,13 @@ class IndexBuilder:
         seen_hashes: Set[bytes] = set()
         if self.resuming:
             seen_hashes = parents.load_hashes()
-            logger.info(f"Dedup set rebuilt from disk: {len(seen_hashes):,} known passages")
+            logger.info(f"Dedup set rebuilt: {len(seen_hashes):,} known passages")
 
         pending: List[Chunk] = []
         pending_meta: List[Dict[str, Any]] = []
         pending_semantic: List[Tuple[str, List[str], Dict[str, Any]]] = []
 
         def resolve_semantic():
-            """
-            Semantic chunking needs sentence vectors. Doing that per passage fired
-            one tiny GPU call per long passage -- roughly 11,000 launches for a
-            20k-query build, each dominated by launch and sync overhead rather
-            than actual compute. Here every deferred passage's sentences are
-            encoded in ONE call and sliced back apart.
-
-            Identical vectors, identical chunks: encoding is per-sentence and
-            order-preserving, so batching changes nothing except the call count.
-            """
             if not pending_semantic:
                 return
             all_sents: List[str] = []
@@ -869,24 +658,15 @@ class IndexBuilder:
             pending_meta.clear()
             gc.collect()
 
-        logger.info("=" * 74)
-        logger.info(f"{'EXTENDING' if self.resuming else 'BUILDING'} INDEX | "
-                    f"target {self.cfg.num_queries:,} queries | ALL 10 passages each")
-        logger.info("=" * 74)
+        logger.info(f"{'EXTENDING' if self.resuming else 'BUILDING'} INDEX | target {self.cfg.num_queries:,} queries")
 
         queries_done = self.start_query
-        t_first_row: Optional[float] = None      # set when real work begins
+        t_first_row: Optional[float] = None
         try:
             for row in stream_rows(self.cfg.split, self.cfg.num_queries,
                                    self.cfg.stream_batch, skip=self.start_query):
                 if t_first_row is None:
-                    # Throughput must be measured from here, not from t0. t0
-                    # precedes the model download, the BM25 load and the 461MB
-                    # parquet fetch -- charging that one-time setup against the
-                    # first checkpoint's 2,000 queries inflates the ETA several-fold.
                     t_first_row = time.perf_counter()
-                    logger.info(f"Setup took {(t_first_row - t0)/60:.1f} min; "
-                                f"timing throughput from here.")
 
                 self.stats["queries"] += 1
                 queries_done += 1
@@ -929,8 +709,6 @@ class IndexBuilder:
 
                     meta = {"query_type": qtype, "is_selected": is_sel}
                     if needs_semantic:
-                        # Deferred so all long passages in this batch are encoded
-                        # in a single GPU call at flush time.
                         pending_semantic.append((parent_id, sents, meta))
 
                     pending.extend(chunks)
@@ -939,34 +717,31 @@ class IndexBuilder:
                 if len(pending) >= self.cfg.gpu_batch_size * 4:
                     flush()
 
-                # Durable checkpoint. A Colab disconnect costs the last few minutes,
-                # not the whole run -- re-running picks up from here.
                 if queries_done % self.cfg.checkpoint_every == 0:
                     flush(wait=True)
                     parents.flush()
                     self._write_manifest(queries_done, parents.count(), final=False)
                     now = time.perf_counter()
-                    work_s = now - (t_first_row or t0)      # excludes one-time setup
+                    work_s = now - (t_first_row or t0)
                     done_here = queries_done - self.start_query
-                    rate = done_here / max(work_s, 1e-9)    # queries/sec, steady state
+                    rate = done_here / max(work_s, 1e-9)
                     remaining = max(0, self.cfg.num_queries - queries_done)
                     logger.info(
                         f"CHECKPOINT {queries_done:>7,}/{self.cfg.num_queries:,} | "
                         f"{self.stats['passages_unique']:>8,} passages | "
                         f"{self.stats['vectors']:>9,} vectors | "
-                        f"{rate*60:6.0f} q/min | {(now-t0)/60:5.1f} min elapsed | "
-                        f"~{remaining/max(rate,1e-9)/60:5.1f} min left"
+                        f"{rate*60:6.0f} q/min | {(now-t0)/60:5.1f} min elapsed"
                     )
 
         except KeyboardInterrupt:
-            logger.warning("Interrupted -- flushing and checkpointing before exit.")
+            logger.warning("Interrupted -- flushing and checkpointing...")
 
         flush(wait=True)
         n_parents = parents.finish()
         self._write_manifest(queries_done, n_parents, final=True)
 
         info = client.get_collection(self.cfg.collection)
-        logger.info(f"Collection reports {info.points_count:,} points")
+        logger.info(f"Collection points: {info.points_count:,}")
 
         if self.cfg.verify_parity:
             self._verify_parity()
@@ -978,7 +753,6 @@ class IndexBuilder:
         self._report(time.perf_counter() - t0, n_parents, queries_done)
 
         if self._server_proc is not None:
-            logger.info("Stopping the Qdrant process started by this script.")
             self._server_proc.terminate()
             try:
                 self._server_proc.wait(timeout=30)
@@ -986,43 +760,27 @@ class IndexBuilder:
                 self._server_proc.kill()
 
     def _export_snapshot(self, client) -> Optional[str]:
-        """
-        A snapshot is Qdrant's portable format: build here, restore into the
-        deployed server. Copying the raw storage directory also works but only
-        between identical Qdrant versions, so the snapshot is the safer artifact.
-        """
         try:
-            logger.info("Creating collection snapshot ...")
+            logger.info("Creating snapshot ...")
             snap = client.create_snapshot(collection_name=self.cfg.collection, wait=True)
             name = getattr(snap, "name", None)
             if not name:
-                logger.warning("Snapshot API returned no name; skipping download.")
                 return None
 
             os.makedirs(self.cfg.snapshot_dir, exist_ok=True)
             dest = os.path.join(self.cfg.snapshot_dir, name)
 
             import urllib.request
-            url = (f"{self.cfg.qdrant_url}/collections/{self.cfg.collection}"
-                   f"/snapshots/{name}")
+            url = f"{self.cfg.qdrant_url}/collections/{self.cfg.collection}/snapshots/{name}"
             urllib.request.urlretrieve(url, dest)
             size = os.path.getsize(dest)
             logger.info(f"Snapshot saved: {dest} ({size/1e6:,.0f} MB)")
             return dest
         except Exception as e:
-            logger.warning(f"Snapshot export failed ({e}). The raw storage directory "
-                           f"at '{self.cfg.server_storage}' is still usable if the "
-                           f"deployed Qdrant runs the same version.")
+            logger.warning(f"Snapshot export failed: {e}")
             return None
 
-    # -------------------------------------------------------- parity check
-
     def _verify_parity(self):
-        """
-        The index is built with sentence-transformers on GPU, but the server
-        encodes queries with fastembed ONNX on CPU. If those two disagree, every
-        search silently returns garbage. This catches it at build time.
-        """
         try:
             from fastembed import TextEmbedding
             from fastembed.common.model_description import PoolingType, ModelSource
@@ -1037,7 +795,7 @@ class IndexBuilder:
                 sources=ModelSource(hf=self.cfg.model_name),
                 dim=self.cfg.embed_dim, model_file="onnx/model.onnx")
         except Exception:
-            pass  # already registered
+            pass
 
         cpu = TextEmbedding(model_name=self.cfg.model_name)
         cpu_vecs = np.array(list(cpu.embed([self.cfg.query_prefix + p for p in probes])))
@@ -1047,18 +805,7 @@ class IndexBuilder:
             normalize_embeddings=True, convert_to_numpy=True)
 
         sims = np.einsum("ij,ij->i", cpu_vecs, gpu_vecs)
-        logger.info("-" * 60)
-        logger.info("GPU(build) vs CPU(serve) vector parity")
-        for p, s in zip(probes, sims):
-            logger.info(f"  cos={s:.6f} [{'OK' if s > 0.999 else 'MISMATCH'}]  {p}")
-        if sims.min() <= 0.999:
-            logger.error("PARITY FAILED -- serving vectors will not match the index. "
-                         "Check pooling / normalization / model_file before shipping.")
-        else:
-            logger.info("Parity OK. Index is safe to serve with fastembed CPU.")
-        logger.info("-" * 60)
-
-    # --------------------------------------------------------------- report
+        logger.info(f"Vector parity check: min_cosine={sims.min():.6f}")
 
     def _report(self, elapsed: float, n_parents: int, queries_done: int):
         s = self.stats
@@ -1068,50 +815,16 @@ class IndexBuilder:
                  if os.path.isdir(store) else 0)
         psize = os.path.getsize(self.cfg.parent_db)
 
-        logger.info("")
         logger.info("=" * 74)
         logger.info("BUILD COMPLETE" if queries_done >= self.cfg.num_queries else "STOPPED EARLY")
         logger.info("=" * 74)
-        logger.info(f"  this run             : {elapsed/60:.1f} min "
-                    f"({queries_done - self.start_query:,} new queries)")
-        logger.info(f"  queries covered      : {queries_done:,} (cumulative)")
-        logger.info(f"  passages seen        : {s['passages_seen']:,}")
-        logger.info(f"  unique passages      : {s['passages_unique']:,}  "
-                    f"(dropped {s['duplicates_skipped']:,} exact duplicates)")
-        logger.info(f"  vectors indexed      : {s['vectors']:,}  "
-                    f"({s['vectors']/max(1, s['passages_unique']):.2f} per passage)")
-        logger.info("")
-        logger.info("  tier routing:")
-        for k, v in s["by_tier"].items():
-            logger.info(f"    {k:<10} {v:>9,}  ({v/max(1, s['passages_unique'])*100:5.1f}%)")
-        logger.info("  vectors by strategy:")
-        for k, v in s["by_strategy"].items():
-            logger.info(f"    {k:<10} {v:>9,}  ({v/max(1, s['vectors'])*100:5.1f}%)")
-        logger.info("")
-        snap = getattr(self, "snapshot_file", None)
-        logger.info(f"  vector storage       : {qsize/1e6:,.0f} MB  ({store})")
-        logger.info(f"  parents.sqlite       : {psize/1e6:,.0f} MB  ({n_parents:,} rows)")
-        if snap:
-            logger.info(f"  snapshot             : {os.path.getsize(snap)/1e6:,.0f} MB  ({snap})")
-        logger.info(f"  transport            : {'SERVER (HNSW)' if self.use_server else 'LOCAL (brute force)'}")
+        logger.info(f"  elapsed              : {elapsed/60:.1f} min")
+        logger.info(f"  queries covered      : {queries_done:,}")
+        logger.info(f"  passages unique      : {s['passages_unique']:,}")
+        logger.info(f"  vectors indexed      : {s['vectors']:,}")
+        logger.info(f"  vector storage       : {qsize/1e6:,.0f} MB")
+        logger.info(f"  parents.sqlite       : {psize/1e6:,.0f} MB ({n_parents:,} rows)")
         logger.info("=" * 74)
-        logger.info("")
-        logger.info("To extend later: raise CFG.num_queries and re-run. Already-indexed")
-        logger.info("queries are skipped -- no re-vectorising.")
-        logger.info("")
-        if self.use_server:
-            logger.info("DOWNLOAD THESE:")
-            if snap:
-                logger.info(f"  {snap}          <- restore into the deployed Qdrant")
-            logger.info(f"  {self.cfg.parent_db}")
-            logger.info(f"  {self.cfg.manifest_path}")
-            logger.info("")
-            logger.info("  !zip -r index.zip snapshots parents.sqlite index_manifest.json")
-            logger.info("")
-            logger.info(f"Your deployment must run Qdrant {self.cfg.qdrant_version} as a")
-            logger.info("service and set QDRANT_URL. Local file mode cannot read this index.")
-        else:
-            logger.info("  !zip -r index.zip qdrant_data parents.sqlite index_manifest.json")
 
 
 if __name__ == "__main__":

@@ -1,33 +1,6 @@
 #!/usr/bin/env python3
 """
-Pluggable LLM Backend (llm.py)
-==============================
-HH Goa 2026 Task 2. Lets generation be swapped between providers by config so the
-200ms budget question is settled with measurements instead of arguments.
-
-WHY THIS EXISTS
----------------
-`llm_generate` is the largest in-budget stage, and its cost is dominated by
-geography, not model size. Groq runs in the US; from an Indian host that is a
-~200ms+ round trip before a single token is produced. Sarvam runs in India.
-Which wins depends on RTT vs tokens/sec, and neither is knowable without running
-both — so both are implemented behind one interface and benchmark.py can compare
-them head to head.
-
-PROVIDERS
----------
-  groq    llama-3.1-8b-instant etc. Very high tokens/sec, US-hosted.
-  sarvam  sarvam-105b-conversations. India-hosted, Indic-native, OpenAI-compatible.
-
-Both expose the same OpenAI-shaped chat completions API, so one httpx path serves
-both and no extra SDK is needed.
-
-SARVAM GOTCHA (from their docs, "Known Limitations")
-----------------------------------------------------
-Reasoning is ENABLED BY DEFAULT (reasoning_effort="low") and reasoning tokens
-count toward max_tokens. With max_tokens=48 the model can spend the entire budget
-thinking and return an empty visible answer -- while costing extra latency for a
-RAG lookup that needs no reasoning at all. This module disables it by default.
+Pluggable LLM Backend (Groq & Sarvam)
 """
 
 from __future__ import annotations
@@ -36,17 +9,13 @@ import os
 import json
 import time
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, AsyncIterator, Tuple
 
 import httpx
 
 logger = logging.getLogger("LLM")
 
-
-# ============================================================================
-# RESULT
-# ============================================================================
 
 @dataclass
 class LLMResult:
@@ -56,7 +25,7 @@ class LLMResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     reasoning_tokens: int = 0
-    ttft_ms: Optional[float] = None      # streaming only
+    ttft_ms: Optional[float] = None
     total_ms: float = 0.0
     finish_reason: str = ""
 
@@ -66,10 +35,6 @@ class LLMResult:
             return 0.0
         return round(self.completion_tokens / (self.total_ms / 1000.0), 2)
 
-
-# ============================================================================
-# BASE
-# ============================================================================
 
 class LLMError(RuntimeError):
     pass
@@ -86,15 +51,10 @@ class BaseLLM:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
-        # One pooled client per provider: a fresh connection per request would add
-        # a TLS handshake (~1 RTT, the very thing we are trying to minimise) to
-        # every single query.
         self._client = httpx.AsyncClient(
             timeout=timeout_s,
             limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
         )
-
-    # -- subclass hooks -----------------------------------------------------
 
     def headers(self) -> Dict[str, str]:
         raise NotImplementedError
@@ -106,8 +66,6 @@ class BaseLLM:
     @property
     def endpoint(self) -> str:
         return f"{self.base_url}/chat/completions"
-
-    # -- shared OpenAI-shaped calls -----------------------------------------
 
     async def generate(self, messages: List[Dict[str, str]], temperature: float = 0.0,
                        max_tokens: int = 48) -> LLMResult:
@@ -126,11 +84,6 @@ class BaseLLM:
 
     async def stream(self, messages: List[Dict[str, str]], temperature: float = 0.0,
                      max_tokens: int = 48) -> AsyncIterator[Tuple[str, Optional[LLMResult]]]:
-        """
-        Yields (delta, None) per token, then ("", LLMResult) once at the end.
-        TTFT is captured on the first non-empty delta -- the moment a user would
-        actually see something.
-        """
         t0 = time.perf_counter()
         body = self.payload(messages, temperature, max_tokens, stream=True)
         ttft: Optional[float] = None
@@ -171,7 +124,7 @@ class BaseLLM:
         total = (time.perf_counter() - t0) * 1000.0
         yield "", LLMResult(
             text=text, provider=self.provider, model=self.model,
-            completion_tokens=len(parts),   # delta count; approximate, labelled as such
+            completion_tokens=len(parts),
             ttft_ms=round(ttft, 2) if ttft is not None else None,
             total_ms=round(total, 2), finish_reason=finish,
         )
@@ -196,10 +149,6 @@ class BaseLLM:
         await self._client.aclose()
 
 
-# ============================================================================
-# GROQ
-# ============================================================================
-
 class GroqLLM(BaseLLM):
     provider = "groq"
 
@@ -221,32 +170,20 @@ class GroqLLM(BaseLLM):
                 "temperature": temperature, "max_tokens": max_tokens, "stream": stream}
 
 
-# ============================================================================
-# SARVAM
-# ============================================================================
-
 class SarvamLLM(BaseLLM):
     provider = "sarvam"
 
     def __init__(self, model: Optional[str] = None, api_key: Optional[str] = None,
                  timeout_s: float = 8.0):
         super().__init__(
-            # The "-conversations" variant is post-trained for real-time dialogue
-            # and voice agents. The plain flagship is tuned for long reasoning,
-            # which is the opposite of what a sub-200ms RAG lookup wants.
             model=model or os.getenv("SARVAM_LLM_MODEL", "sarvam-105b-conversations"),
             api_key=api_key or os.getenv("SARVAM_API_KEY") or "",
             base_url=os.getenv("SARVAM_BASE_URL", "https://api.sarvam.ai/v1"),
             timeout_s=timeout_s,
         )
-        # "none" disables thinking mode. See the class docstring: leaving it on
-        # spends max_tokens on reasoning and can return an empty visible answer.
         self.reasoning_effort = (os.getenv("SARVAM_REASONING_EFFORT", "none") or "none").lower()
 
     def headers(self) -> Dict[str, str]:
-        # Sarvam's STT uses `api-subscription-key`; their chat API is documented as
-        # OpenAI-compatible, which normally implies a bearer token. Both are sent so
-        # whichever the gateway expects is present. Harmless if one is ignored.
         return {
             "Authorization": f"Bearer {self.api_key}",
             "api-subscription-key": self.api_key,
@@ -258,15 +195,10 @@ class SarvamLLM(BaseLLM):
             "model": self.model, "messages": messages,
             "temperature": temperature, "max_tokens": max_tokens, "stream": stream,
         }
-        # JSON null is the wire form of the SDK's reasoning_effort=None.
         disabled = self.reasoning_effort in ("none", "null", "off", "false", "")
         body["reasoning_effort"] = None if disabled else self.reasoning_effort
         return body
 
-
-# ============================================================================
-# FACTORY
-# ============================================================================
 
 _PROVIDERS = {"groq": GroqLLM, "sarvam": SarvamLLM}
 
@@ -281,19 +213,14 @@ def build_llm(provider: Optional[str] = None, timeout_s: float = 8.0) -> BaseLLM
 
 
 def available_providers() -> Dict[str, bool]:
-    """Which providers have a key configured. Used by /health."""
     return {
         "groq": bool(os.getenv("GROQ_API_KEY") or os.getenv("QROQ_API_KEY")),
         "sarvam": bool(os.getenv("SARVAM_API_KEY")),
     }
 
 
-# ============================================================================
-# SELF-TEST  (request shaping only; no network unless --live)
-# ============================================================================
-
 if __name__ == "__main__":
-    import sys, asyncio
+    import sys
     if sys.platform == "win32":
         try:
             sys.stdout.reconfigure(encoding="utf-8")

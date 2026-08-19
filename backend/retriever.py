@@ -63,47 +63,35 @@ logging.basicConfig(
 logger = logging.getLogger("IndicRetriever")
 
 
-# ============================================================================
-# ERRORS  (distinguishable failure modes)
-# ============================================================================
-
 class RetrieverError(RuntimeError):
-    """Base class for retrieval failures."""
+    pass
 
 
 class IndexUnavailableError(RetrieverError):
-    """Collection missing or empty. The server must not report itself healthy."""
+    pass
 
 
 class IndexMismatchError(RetrieverError):
-    """Serving model disagrees with the model the index was built with."""
+    pass
 
 
 class SearchFailedError(RetrieverError):
-    """Qdrant raised during a query. Never silently downgraded to 'no results'."""
+    pass
 
-
-# ============================================================================
-# SCHEMAS
-# ============================================================================
 
 class RetrievedHit(BaseModel):
-    score: float = Field(..., description="Fused relevance score (RRF, scale-free)")
-    raw_score: float = Field(0.0, description="Best DENSE cosine similarity, 0..1. "
-                                              "This is the semantic-relevance signal the "
-                                              "retrieval guardrail thresholds on.")
-    sparse_score: float = Field(0.0, description="Best BM25 score. Unbounded — never "
-                                                 "mix with raw_score or threshold on it.")
+    score: float = Field(..., description="Fused relevance score (RRF)")
+    raw_score: float = Field(0.0, description="Best dense cosine similarity, 0..1")
+    sparse_score: float = Field(0.0, description="Best BM25 score")
     strategy: str = Field(..., description="Chunking strategy of the best-matching chunk")
-    strategies_matched: List[str] = Field(default_factory=list,
-                                          description="All strategies whose chunks matched this passage")
+    strategies_matched: List[str] = Field(default_factory=list, description="All strategies whose chunks matched")
     child_text: str = Field("", description="Best matching chunk text")
     parent_id: str
     parent_text: str = Field("", description="Full passage used as LLM context")
     chunk_index: int = 0
     total_chunks: int = 1
     query_id: Optional[str] = None
-    query_type: Optional[str] = Field(None, description="DESCRIPTION / NUMERIC / ENTITY / PERSON / LOCATION")
+    query_type: Optional[str] = Field(None, description="Query type metadata")
     language: str = "hi"
 
 
@@ -112,14 +100,8 @@ class RetrievalResult(BaseModel):
     combined_parent_context: str
     hits: List[RetrievedHit] = Field(default_factory=list)
     top_score: float = 0.0
-    score_margin: float = Field(0.0, description=
-        "top_score minus the mean of the next MARGIN_WINDOW candidate passages' "
-        "raw scores. Low margin means nothing stood out from the field — the "
-        "signal the OFF_TOPIC gate actually needs, since absolute E5 cosine "
-        "barely separates real from off-topic queries on its own (calibrated "
-        "2026-08-19: real p50=0.896, out-of-domain p50=0.872).")
-    margin_candidates: int = Field(0, description=
-        "distinct passages the margin was computed over")
+    score_margin: float = Field(0.0, description="Margin between top score and candidate field mean")
+    margin_candidates: int = Field(0, description="Distinct passages margin was computed over")
     embed_latency_ms: float = 0.0
     search_latency_ms: float = 0.0
     fusion_latency_ms: float = 0.0
@@ -128,45 +110,18 @@ class RetrievalResult(BaseModel):
     mode: str = "legacy"
     transport: str = "local"
     cache_hit: bool = False
-    stage_timings: List[Dict[str, Any]] = Field(default_factory=list,
-        description="Per-stage latency, from profiling.Profiler")
+    stage_timings: List[Dict[str, Any]] = Field(default_factory=list, description="Per-stage latency")
 
-
-# ============================================================================
-# MODEL-AWARE PREFIXES
-# ============================================================================
 
 def prefixes_for_model(model_name: str) -> Tuple[str, str]:
-    """
-    Returns (query_prefix, passage_prefix).
-
-    E5 is trained on asymmetric pairs and REQUIRES the markers. Everything else
-    in play here (paraphrase-MiniLM, mpnet, BGE-M3) is trained without them, and
-    adding them measurably hurts. Getting this wrong is silent — the vectors are
-    still valid, just worse — which is exactly why it is derived, not configured.
-    """
     n = (model_name or "").lower()
     if "e5" in n:
         return "query: ", "passage: "
     return "", ""
 
 
-# ============================================================================
-# QUERY NORMALISATION
-# ============================================================================
-
-# Sarvam returns Devanagari transliterations of English question words when the
-# speaker code-mixes. Mapping them to native Hindi puts the query vector in the
-# same region as the passages.
-#
-# NOTE ON BOUNDARIES: \b is defined in terms of \w, and Devanagari combining
-# marks (nukta, matras) sit inside \w, so \b does NOT fire where a human would
-# expect a word edge. The original patterns used \b and silently half-matched --
-# "हाउ डज़" became "कैसे डज़" instead of "कैसे" because the trailing \b after the
-# nukta in डज़ never matched. These lookarounds are the correct boundary for
-# Devanagari.
-_L = r'(?<![ऀ-ॿ])'      # not preceded by a Devanagari char
-_R = r'(?![ऀ-ॿ])'       # not followed by a Devanagari char
+_L = r'(?<![ऀ-ॿ])'
+_R = r'(?![ऀ-ॿ])'
 
 PHONETIC_PATTERNS = [
     (r'(व्हाट\s+(?:इज़|इज|वाज़|आर|वर|अबाउट))', 'क्या है'),
@@ -199,21 +154,9 @@ def normalize_query_text(query: str) -> str:
     return norm.strip()
 
 
-# ============================================================================
-# PARENT STORE
-# ============================================================================
-
 class ParentStore:
-    """
-    Passage text lives here once instead of being copied onto every child vector.
-    A primary-key lookup is ~50 microseconds, so this costs nothing measurable
-    while removing several hundred megabytes from a full-size index.
-    """
-
     def __init__(self, path: str):
         self.path = path
-        # check_same_thread=False: FastAPI runs sync handlers on a threadpool.
-        # Reads only, so concurrent access is safe.
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.count = self.conn.execute("SELECT COUNT(*) FROM parents").fetchone()[0]
@@ -230,15 +173,10 @@ class ParentStore:
         return {r["parent_id"]: r for r in rows}
 
 
-# ============================================================================
-# RETRIEVER
-# ============================================================================
-
 class IndicRetriever:
-
-    RRF_K = 60          # standard RRF damping constant
-    OVERFETCH = 8       # chunks pulled per requested passage, before fusion
-    MARGIN_WINDOW = 10  # candidates averaged for the "rest of the field" in score_margin
+    RRF_K = 60
+    OVERFETCH = 8
+    MARGIN_WINDOW = 10
 
     def __init__(
         self,
@@ -254,7 +192,6 @@ class IndicRetriever:
         self.qdrant_path = qdrant_path or os.getenv("QDRANT_PATH", "./qdrant_data")
         self.strict = strict
 
-        # --- manifest decides which mode we run in -------------------------
         self.manifest_path = manifest_path or os.getenv(
             "INDEX_MANIFEST", os.path.join(base, "index_manifest.json"))
         self.manifest = self._load_manifest(self.manifest_path)
@@ -262,20 +199,11 @@ class IndicRetriever:
 
         if self.manifest:
             self.collection_name = collection_name or self.manifest["collection"]
-
-            # The manifest WINS over env/args. The index is the ground truth about
-            # which model produced it, and a wrong model here is the worst class of
-            # bug available: multilingual-e5-small and paraphrase-MiniLM are both
-            # 384-dim, so a dimension check cannot catch the swap. Every search
-            # would return confident nonsense with no error anywhere.
             self.embedding_model_name = self.manifest["model_name"]
             requested = embedding_model or os.getenv("EMBEDDING_MODEL")
             if requested and requested != self.embedding_model_name:
                 raise IndexMismatchError(
-                    f"EMBEDDING_MODEL is '{requested}' but the index was built with "
-                    f"'{self.embedding_model_name}'. These may share a dimension, so "
-                    f"nothing would raise at query time — results would just be wrong. "
-                    f"Either unset EMBEDDING_MODEL or rebuild the index."
+                    f"EMBEDDING_MODEL is '{requested}' but index was built with '{self.embedding_model_name}'."
                 )
 
             self.dense_vector_name = self.manifest.get("dense_vector_name", "dense")
@@ -288,13 +216,12 @@ class IndicRetriever:
                 "QDRANT_COLLECTION", "indic_rag_msmarco_hi")
             self.embedding_model_name = embedding_model or os.getenv(
                 "EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-            self.dense_vector_name = None      # unnamed / default vector
+            self.dense_vector_name = None
             self.sparse_vector_name = None
             self.expected_dim = None
             parent_db = None
 
         self.query_prefix, self.passage_prefix = prefixes_for_model(self.embedding_model_name)
-
         self._embed_cache: Dict[str, List[float]] = {}
         self._max_cache_size = 2000
 
@@ -306,12 +233,6 @@ class IndicRetriever:
 
         self._init_encoder()
 
-        # --- transport: server URL beats local path ------------------------
-        # qdrant-client's local (path=) mode is documented for <20,000 points and
-        # does BRUTE-FORCE numpy search -- hnsw_config is accepted and ignored. At
-        # 720k vectors that is a linear scan per query and the 200ms budget is
-        # gone. A real server builds an actual HNSW index, so search stays in
-        # single-digit ms as the corpus grows.
         self.qdrant_url = qdrant_url or os.getenv("QDRANT_URL") or None
         if self.qdrant_url:
             logger.info(f"Connecting to Qdrant server at {self.qdrant_url} (mode={self.mode})...")
@@ -323,55 +244,37 @@ class IndicRetriever:
             )
             self.transport = "server"
         else:
-            logger.warning(
-                f"No QDRANT_URL set — falling back to local file mode at '{self.qdrant_path}'. "
-                f"This does brute-force search and is only viable below ~20,000 points."
-            )
+            logger.warning(f"No QDRANT_URL set — falling back to local file mode at '{self.qdrant_path}'.")
             self.client = QdrantClient(path=self.qdrant_path)
             self.transport = "local"
 
-        # HNSW ef: higher = better recall, slower search. Server mode only.
         self.hnsw_ef = int(os.getenv("HNSW_EF", "128"))
 
-        # The two storage formats are not interchangeable. Catch the mismatch here
-        # rather than letting it surface as a confusing "collection not found".
         expected = (self.manifest or {}).get("transport")
         if expected and expected != self.transport:
             raise IndexUnavailableError(
-                f"The index was built for transport '{expected}' but this process is "
-                f"using '{self.transport}'. Qdrant server storage and local-mode "
-                f"storage are different formats.\n"
-                + ("Set QDRANT_URL to a running Qdrant server and restore the snapshot."
-                   if expected == "server" else
-                   "Unset QDRANT_URL to read this local-mode index from disk.")
+                f"The index was built for transport '{expected}' but process is using '{self.transport}'."
             )
 
         self._verify_collection()
 
-        # --- parent store (hybrid mode only) -------------------------------
         self.parents: Optional[ParentStore] = None
         if parent_db and os.path.exists(parent_db):
             self.parents = ParentStore(parent_db)
             logger.info(f"Parent store loaded: {self.parents.count:,} passages")
         elif self.mode == "hybrid":
-            raise IndexUnavailableError(
-                f"Manifest declares parent store '{parent_db}' but the file is missing. "
-                f"Download parents.sqlite alongside qdrant_data/."
-            )
+            raise IndexUnavailableError(f"Parent store '{parent_db}' missing.")
 
-        # --- sparse encoder (hybrid mode only) -----------------------------
         self.bm25 = None
         if self.sparse_vector_name:
             try:
                 from fastembed import SparseTextEmbedding
                 self.bm25 = SparseTextEmbedding(model_name="Qdrant/bm25", disable_stemmer=True)
                 list(self.bm25.embed(["warmup"]))
-                logger.info("BM25 sparse encoder ready (hybrid retrieval enabled)")
+                logger.info("BM25 sparse encoder ready")
             except Exception as e:
-                logger.warning(f"BM25 unavailable, falling back to dense-only: {e}")
+                logger.warning(f"BM25 unavailable: {e}")
                 self.sparse_vector_name = None
-
-    # ------------------------------------------------------------------ init
 
     @staticmethod
     def _load_manifest(path: str) -> Optional[Dict[str, Any]]:
@@ -380,8 +283,7 @@ class IndicRetriever:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 m = json.load(f)
-            logger.info(f"Index manifest found: model={m.get('model_name')} "
-                        f"dim={m.get('embed_dim')} built={m.get('built_at')}")
+            logger.info(f"Index manifest found: model={m.get('model_name')} dim={m.get('embed_dim')}")
             return m
         except Exception as e:
             logger.error(f"Manifest at '{path}' is unreadable: {e}")
@@ -389,10 +291,6 @@ class IndicRetriever:
 
     @staticmethod
     def _builtin_model_names() -> set:
-        """
-        fastembed changed this return type across versions: older releases yield
-        dicts, 0.5+ yields dataclasses. Handle both rather than pinning a version.
-        """
         from fastembed import TextEmbedding
         names = set()
         try:
@@ -405,9 +303,6 @@ class IndicRetriever:
     def _init_encoder(self):
         from fastembed import TextEmbedding
 
-        # fastembed ships only a handful of multilingual models by default.
-        # e5-small/base have official ONNX exports but are not in the built-in
-        # list, so they are registered on the fly.
         if self.embedding_model_name not in self._builtin_model_names():
             try:
                 from fastembed.common.model_description import PoolingType, ModelSource
@@ -422,12 +317,9 @@ class IndicRetriever:
                 )
                 logger.info(f"Registered custom model '{self.embedding_model_name}' (dim={dim})")
             except Exception as e:
-                raise IndexMismatchError(
-                    f"Cannot load embedding model '{self.embedding_model_name}': {e}"
-                )
+                raise IndexMismatchError(f"Cannot load embedding model '{self.embedding_model_name}': {e}")
 
-        logger.info(f"Loading encoder '{self.embedding_model_name}' "
-                    f"(query_prefix={self.query_prefix!r})...")
+        logger.info(f"Loading encoder '{self.embedding_model_name}'...")
         t0 = time.perf_counter()
         self.embed_model = TextEmbedding(model_name=self.embedding_model_name)
         warm = list(self.embed_model.embed([self.query_prefix + "warmup"]))[0]
@@ -436,22 +328,13 @@ class IndicRetriever:
 
         if self.expected_dim and self.embedding_dim != self.expected_dim:
             raise IndexMismatchError(
-                f"Model '{self.embedding_model_name}' produces {self.embedding_dim}-dim vectors "
-                f"but the index was built at {self.expected_dim} dims."
+                f"Model '{self.embedding_model_name}' produces {self.embedding_dim}-dim vectors but index was built at {self.expected_dim} dims."
             )
 
     def _verify_collection(self):
-        """
-        Loud on failure. The old version logged a warning and carried on, so a
-        missing index produced a healthy-looking server that answered every
-        question with 'no information available'.
-        """
         if not self.client.collection_exists(self.collection_name):
             where = self.qdrant_url or self.qdrant_path
-            msg = (f"Collection '{self.collection_name}' not found at '{where}'. "
-                   f"Build it with build_index_gpu.py and restore the snapshot. "
-                   f"(ingest_pipeline.py still works but produces the LEGACY format: "
-                   f"unnamed vectors, no manifest, no BM25 — usable only in local mode.)")
+            msg = f"Collection '{self.collection_name}' not found at '{where}'."
             if self.strict:
                 raise IndexUnavailableError(msg)
             logger.error(msg)
@@ -467,16 +350,13 @@ class IndicRetriever:
             logger.error(msg)
             return
 
-        # Dimension check against what the collection actually stores.
         try:
             vec_cfg = info.config.params.vectors
             stored_dim = (vec_cfg.size if hasattr(vec_cfg, "size")
                           else vec_cfg[self.dense_vector_name].size)
             if stored_dim != self.embedding_dim:
                 raise IndexMismatchError(
-                    f"Index stores {stored_dim}-dim vectors but the encoder produces "
-                    f"{self.embedding_dim}. The index was built with a different model — "
-                    f"every search would return meaningless results. Rebuild or switch models."
+                    f"Index stores {stored_dim}-dim vectors but encoder produces {self.embedding_dim}."
                 )
         except IndexMismatchError:
             raise
@@ -484,8 +364,6 @@ class IndicRetriever:
             logger.warning(f"Could not verify stored vector dimension: {e}")
 
         logger.info(f"Collection '{self.collection_name}' ready | {self.points_count:,} vectors")
-
-    # ------------------------------------------------------------- embedding
 
     def _get_embedding(self, text: str) -> Tuple[List[float], bool]:
         if text in self._embed_cache:
@@ -498,26 +376,16 @@ class IndicRetriever:
         self._embed_cache[text] = emb
         return emb, False
 
-    # --------------------------------------------------------------- fusion
-
     @staticmethod
     def _rrf(rank: int, k: int = RRF_K) -> float:
         return 1.0 / (k + rank + 1)
 
     def _fuse(self, ranked_lists: Sequence[Sequence[Any]]) -> Dict[Any, float]:
-        """
-        Reciprocal Rank Fusion over N ranked lists of point ids.
-
-        RRF is used rather than score averaging because dense cosine scores and
-        BM25 scores live on incompatible scales; ranks are directly comparable.
-        """
         fused: Dict[Any, float] = {}
         for lst in ranked_lists:
             for rank, pid in enumerate(lst):
                 fused[pid] = fused.get(pid, 0.0) + self._rrf(rank)
         return fused
-
-    # -------------------------------------------------------------- retrieve
 
     def retrieve(
         self,
@@ -529,19 +397,7 @@ class IndicRetriever:
         normalize: bool = True,
         profiler: Optional["Profiler"] = None,
     ) -> RetrievalResult:
-        """
-        Args:
-            query:           question text (Hindi / English / code-mixed)
-            top_k:           number of distinct PASSAGES to return
-            strategy:        optional filter to one chunking strategy
-            score_threshold: minimum raw cosine similarity; hits below are dropped.
-                             This is the off-topic gate — wire it to
-                             guardrails.RetrievalGate rather than leaving it unused.
-            query_type:      optional metadata filter (DESCRIPTION / NUMERIC / ...)
-            profiler:        optional Profiler; each phase is recorded as its own
-                             stage so the 200ms budget can be attributed exactly.
-        """
-        from profiling import Profiler  # local import keeps the module dependency-free
+        from profiling import Profiler
 
         prof = profiler if profiler is not None else Profiler(label="retrieval")
         t_start = time.perf_counter()
@@ -550,17 +406,14 @@ class IndicRetriever:
             clean = normalize_query_text(query) if normalize else (query or "").strip()
 
         if not clean:
-            return RetrievalResult(query=query or "", combined_parent_context="",
-                                   mode=self.mode)
+            return RetrievalResult(query=query or "", combined_parent_context="", mode=self.mode)
 
-        # 1. embed -----------------------------------------------------------
         t0 = time.perf_counter()
         with prof.stage("embed_query") as st:
             qvec, cache_hit = self._get_embedding(clean)
             st.detail = "cache hit" if cache_hit else "encoded"
         embed_ms = (time.perf_counter() - t0) * 1000
 
-        # 2. filters ---------------------------------------------------------
         conditions = []
         if strategy and strategy.lower() not in ("all", "none", "", "best match"):
             conditions.append(self._models.FieldCondition(
@@ -572,9 +425,7 @@ class IndicRetriever:
                 match=self._models.MatchValue(value=query_type.upper())))
         qfilter = self._models.Filter(must=conditions) if conditions else None
 
-        # 3. search ----------------------------------------------------------
         limit = max(top_k * self.OVERFETCH, 24)
-        # ef only applies to a real HNSW index; local brute-force mode ignores it.
         search_params = (self._models.SearchParams(hnsw_ef=self.hnsw_ef)
                          if self.transport == "server" else None)
 
@@ -613,7 +464,6 @@ class IndicRetriever:
             raise SearchFailedError(f"Qdrant query failed: {e}") from e
         search_ms = (time.perf_counter() - t0) * 1000
 
-        # 4. fuse ------------------------------------------------------------
         t0 = time.perf_counter()
         prof_fusion = prof.stage("fusion_rrf")
         prof_fusion.__enter__()
@@ -621,12 +471,6 @@ class IndicRetriever:
         for p in list(dense_points) + list(sparse_points):
             by_id.setdefault(p.id, p)
 
-        # Dense and sparse scores live on INCOMPATIBLE SCALES: dense is cosine in
-        # [0,1], BM25 is unbounded (observed up to 85). Keeping them in one field
-        # made raw_score meaningless and silently broke the retrieval guardrail —
-        # MIN_RETRIEVAL_SCORE=0.80 was being compared against values from 0.84 to
-        # 85, so nothing was ever refused. They are tracked separately now, and
-        # only the cosine is used as the semantic-relevance signal.
         dense_scores = {p.id: float(p.score or 0.0) for p in dense_points}
         sparse_scores = {p.id: float(p.score or 0.0) for p in sparse_points}
 
@@ -635,9 +479,6 @@ class IndicRetriever:
             [p.id for p in sparse_points],
         ])
 
-        # Group chunks under their passage. A passage matched by several
-        # strategies accumulates several RRF contributions, which is exactly the
-        # signal multi-strategy chunking is supposed to produce.
         parents: Dict[str, Dict[str, Any]] = {}
         for pid, fscore in fused.items():
             p = by_id[pid]
@@ -652,9 +493,6 @@ class IndicRetriever:
             entry["raw"] = max(entry["raw"], dense_scores.get(pid, 0.0))
             entry["sparse"] = max(entry["sparse"], sparse_scores.get(pid, 0.0))
 
-            # Representative chunk is picked by FUSED rank, not by raw score:
-            # fused rank is the only scale-free comparison available across a
-            # dense hit and a sparse one.
             if fscore > entry["best_fused"]:
                 entry["best_fused"] = fscore
                 entry["best_chunk"] = payload.get("chunk_text", "")
@@ -667,15 +505,6 @@ class IndicRetriever:
             if st:
                 entry["strategies"].add(st)
 
-        # Relative margin: does the best-matching PASSAGE stand out from the other
-        # candidates, or is everything roughly equally (ir)relevant? Computed over
-        # DISTINCT PARENTS (entry["raw"], one value per passage), not raw chunks —
-        # doing it pre-dedup would let several chunks of the SAME top passage
-        # dominate both "top" and "rest" simultaneously (multi-strategy chunking
-        # means a strong passage often has 3-4 matching chunks), which deflates
-        # the apparent margin exactly when the signal should be strongest.
-        # MARGIN_WINDOW candidates below the top are averaged rather than all of
-        # them, so a long tail of weak matches can't dilute a genuine standout.
         all_raw = sorted((e["raw"] for e in parents.values()), reverse=True)
         top_raw = all_raw[0] if all_raw else 0.0
         _rest = all_raw[1:1 + self.MARGIN_WINDOW]
@@ -687,7 +516,6 @@ class IndicRetriever:
         prof_fusion.__exit__(None, None, None)
         fusion_ms = (time.perf_counter() - t0) * 1000
 
-        # 5. resolve passage text --------------------------------------------
         t0 = time.perf_counter()
         prof_parent = prof.stage("parent_fetch")
         prof_parent.__enter__()
@@ -696,7 +524,6 @@ class IndicRetriever:
             rows = self.parents.fetch_many([pid for pid, _ in ordered])
             texts = {k: r["passage"] for k, r in rows.items()}
         else:
-            # legacy index carries the full passage in every payload
             texts = {pid: (e["payload"].get("parent_text") or e["payload"].get("chunk_text", ""))
                      for pid, e in ordered}
         prof_parent.__exit__(None, None, None)
@@ -756,48 +583,26 @@ class IndicRetriever:
         return "passage"
 
 
-# ============================================================================
-# SELF-TEST
-# ============================================================================
-
 if __name__ == "__main__":
     print("=" * 72)
     print("  INDIC RETRIEVER — VERIFICATION")
     print("=" * 72)
 
-    # Prefix derivation is pure logic and worth checking without loading a model.
     cases = [
         ("intfloat/multilingual-e5-small", ("query: ", "passage: ")),
         ("intfloat/multilingual-e5-large", ("query: ", "passage: ")),
         ("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", ("", "")),
         ("BAAI/bge-m3", ("", "")),
     ]
-    print("\nPrefix derivation:")
     for name, want in cases:
         got = prefixes_for_model(name)
         print(f"  {'OK  ' if got == want else 'FAIL'} {name:<58} -> {got}")
 
-    print("\nQuery normalisation:")
-    for q in ["व्हाट इज कॉर्पोरेशन", "हाउ डज़ कंप्यूटर वर्क", "  भारत   की राजधानी  "]:
-        print(f"  {q!r:<40} -> {normalize_query_text(q)!r}")
-
-    print("\nConnecting to index...")
     try:
         r = IndicRetriever(strict=True)
+        for q in ["दवा कैसे काम करती है?", "कॉर्पोरेशन क्या है?"]:
+            res = r.retrieve(q, top_k=3)
+            print(f"\nQuery: {q}")
+            print(f"  mode={res.mode} | TOTAL={res.total_retrieval_latency_ms}ms | top_score={res.top_score}")
     except RetrieverError as e:
         print(f"\n  {type(e).__name__}: {e}\n")
-        sys.exit(1)
-
-    for q in ["दवा कैसे काम करती है?", "कॉर्पोरेशन क्या है?", "संगतता की परिभाषा क्या है?"]:
-        res = r.retrieve(q, top_k=3)
-        print(f"\nQuery: {q}")
-        print(f"  mode={res.mode} | embed={res.embed_latency_ms}ms "
-              f"search={res.search_latency_ms}ms fuse={res.fusion_latency_ms}ms "
-              f"parent={res.parent_fetch_latency_ms}ms TOTAL={res.total_retrieval_latency_ms}ms")
-        print(f"  top_score={res.top_score}  score_margin={res.score_margin} "
-              f"(over {res.margin_candidates} candidate passages)")
-        for i, h in enumerate(res.hits, 1):
-            print(f"   #{i} raw={h.raw_score:.4f} fused={h.score:.5f} "
-                  f"strategies={h.strategies_matched} | {h.parent_text[:80]}...")
-
-    print("\n" + "=" * 72)

@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 """
-Sarvam AI Speech-to-Text (STT) Module (audio_stt.py)
-===================================================
-Designed for HH Goa 2026 Shortlisting Task 2: Sub-200ms Voice-Enabled Indic RAG System.
-
-Key Engineering Features:
-1. High-speed synchronous & asynchronous audio transcription interfaces.
-2. Direct memory-byte processing without disk I/O bottlenecks.
-3. Microsecond latency profiling for STT SLA tracking.
-4. In-memory PCM 16-bit 16kHz WAV audio synthesis helper for automated testing.
-5. Multi-format support (.wav, .mp3, .webm, .ogg) with MIME auto-detection.
+Sarvam AI Speech-to-Text (STT) Client
 """
 
 import os
@@ -20,13 +11,12 @@ import math
 import struct
 import wave
 import logging
-from typing import Optional, Dict, Any, Union
+from typing import Optional
 import requests
 import httpx
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-# Ensure UTF-8 stdout on Windows
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -34,10 +24,8 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Load environment variables
 load_dotenv()
 
-# Configure Structured Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-7s | %(message)s",
@@ -46,12 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger("AudioSTT")
 
 
-# ============================================================================
-# DATA SCHEMAS
-# ============================================================================
-
 class TranscriptionResult(BaseModel):
-    """Structured response from the Sarvam AI STT API."""
     transcript: str = Field(..., description="Transcribed Hindi text in Devanagari script")
     language_code: str = Field("hi-IN", description="Detected or requested language code")
     audio_duration_sec: Optional[float] = Field(None, description="Duration of the audio clip in seconds")
@@ -60,26 +43,18 @@ class TranscriptionResult(BaseModel):
     error_message: Optional[str] = Field(None, description="Error description if status is error")
 
 
-# ============================================================================
-# AUDIO SYNTHESIS & UTILITY HELPERS
-# ============================================================================
-
 def create_dummy_wav_bytes(
     duration_sec: float = 1.0,
     sample_rate: int = 16000,
     frequency: float = 440.0,
     silence: bool = False
 ) -> bytes:
-    """
-    Synthesizes a valid in-memory PCM 16-bit Mono 16kHz WAV audio byte stream.
-    Used for automated pipeline verification and latency ping tests.
-    """
     num_samples = int(sample_rate * duration_sec)
     buffer = io.BytesIO()
 
     with wave.open(buffer, "wb") as wav_file:
-        wav_file.setnchannels(1)        # Mono
-        wav_file.setsampwidth(2)        # 16-bit (2 bytes per sample)
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
         wav_file.setframerate(sample_rate)
         
         frames = bytearray()
@@ -87,7 +62,6 @@ def create_dummy_wav_bytes(
             if silence:
                 sample_val = 0
             else:
-                # Generate a 440Hz sine wave
                 t = float(i) / sample_rate
                 sample_val = int(32767.0 * 0.3 * math.sin(2.0 * math.pi * frequency * t))
             frames.extend(struct.pack("<h", sample_val))
@@ -98,7 +72,6 @@ def create_dummy_wav_bytes(
 
 
 def infer_mime_type(filename: str) -> str:
-    """Infers standard audio MIME type from file extension."""
     ext = os.path.splitext(filename)[1].lower()
     mapping = {
         ".wav": "audio/wav",
@@ -111,16 +84,7 @@ def infer_mime_type(filename: str) -> str:
     return mapping.get(ext, "audio/wav")
 
 
-# ============================================================================
-# SARVAM AI SPEECH-TO-TEXT CLIENT
-# ============================================================================
-
 class SarvamSTTClient:
-    """
-    Dedicated high-performance client for Sarvam AI Speech-to-Text API.
-    Supports both synchronous and asynchronous byte-level transcription.
-    """
-
     API_URL = "https://api.sarvam.ai/speech-to-text"
 
     def __init__(
@@ -132,9 +96,7 @@ class SarvamSTTClient:
     ):
         self.api_key = api_key or os.getenv("SARVAM_API_KEY")
         if not self.api_key:
-            raise ValueError(
-                "Sarvam API Key missing. Please set 'SARVAM_API_KEY' in your .env file or pass it to SarvamSTTClient."
-            )
+            raise ValueError("Sarvam API Key missing. Please set 'SARVAM_API_KEY' in .env.")
 
         self.model = model
         self.language_code = language_code
@@ -143,8 +105,6 @@ class SarvamSTTClient:
         self.headers = {
             "api-subscription-key": self.api_key
         }
-
-        # Persistent HTTP connection session for connection pooling & low latency
         self._session = requests.Session()
         self._session.headers.update(self.headers)
 
@@ -154,17 +114,6 @@ class SarvamSTTClient:
         filename: str = "audio.wav",
         mime_type: Optional[str] = None
     ) -> TranscriptionResult:
-        """
-        Synchronously transcribes an in-memory audio byte array.
-
-        Args:
-            audio_bytes: Raw binary audio bytes (.wav, .mp3, .webm, etc.)
-            filename: Virtual filename used in multipart/form-data upload.
-            mime_type: Optional MIME content type. If omitted, inferred from filename.
-
-        Returns:
-            TranscriptionResult with Hindi transcript and latency metrics.
-        """
         if not audio_bytes or len(audio_bytes) == 0:
             return TranscriptionResult(
                 transcript="",
@@ -241,10 +190,6 @@ class SarvamSTTClient:
         filename: str = "audio.wav",
         mime_type: Optional[str] = None
     ) -> TranscriptionResult:
-        """
-        Asynchronously transcribes audio bytes using httpx.AsyncClient.
-        Ideal for WebSocket servers and non-blocking asynchronous FastAPI endpoints.
-        """
         if not audio_bytes or len(audio_bytes) == 0:
             return TranscriptionResult(
                 transcript="",
@@ -306,9 +251,6 @@ class SarvamSTTClient:
             )
 
     def transcribe_file(self, file_path: str) -> TranscriptionResult:
-        """
-        Convenience method to load audio from a local file path and transcribe.
-        """
         if not os.path.exists(file_path):
             return TranscriptionResult(
                 transcript="",
@@ -333,44 +275,23 @@ class SarvamSTTClient:
             )
 
 
-# ============================================================================
-# STANDALONE CLI & BENCHMARK HARNESS
-# ============================================================================
-
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Sarvam AI Speech-to-Text (STT) Client & Benchmark Harness")
+    parser = argparse.ArgumentParser(description="Sarvam AI Speech-to-Text (STT) Client")
     parser.add_argument("--file", "-f", type=str, default=None, help="Path to local audio file to transcribe.")
-    parser.add_argument("--model", "-m", type=str, default="saaras:v3", help="Sarvam AI STT model (default: 'saaras:v3').")
+    parser.add_argument("--model", "-m", type=str, default="saaras:v3", help="Sarvam AI STT model.")
     parser.add_argument("--benchmark", "-b", action="store_true", help="Run latency benchmark using synthetic audio.")
     args = parser.parse_args()
 
-    print("\n" + "=" * 70)
-    print("  HH GOA 2026: SARVAM AI SPEECH-TO-TEXT (STT) INFERENCE HARNESS")
-    print(f"  Model: {args.model} | Language: hi-IN | Target SLA: Ultra-Low Latency")
-    print("=" * 70)
-
     try:
         client = SarvamSTTClient(model=args.model)
-        print("SarvamSTTClient initialized successfully.\n")
     except ValueError as e:
-        print(f"\n[ERROR] {e}", file=sys.stderr)
+        print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
 
-    # 1. Test local audio file if provided (or default phase1 audio if exists)
     target_file = args.file
-    if not target_file:
-        phase1_audio = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "phase1", "test_audio.wav"))
-        if os.path.exists(phase1_audio):
-            target_file = phase1_audio
-
     if target_file and os.path.exists(target_file):
-        print("-" * 70)
-        print(f"Transcribing Local Audio File: '{target_file}'...")
-        print("-" * 70)
         result = client.transcribe_file(target_file)
-        
-        print("\n--- TRANSCRIPTION RESULT ---")
         print(f"Status      : {result.status.upper()}")
         print(f"Language    : {result.language_code}")
         print(f"STT Latency : {result.stt_latency_ms} ms")
@@ -378,26 +299,15 @@ def main():
             print(f"Transcript  : \"{result.transcript}\"")
         else:
             print(f"Error       : {result.error_message}")
-        print("-" * 70)
 
-    # 2. Benchmark Ping Test with in-memory synthesized WAV
     if args.benchmark or not target_file:
-        print("\n" + "-" * 70)
-        print("Running Synthetic In-Memory Audio Ping Benchmark (1.0s WAV)...")
-        print("-" * 70)
         dummy_wav = create_dummy_wav_bytes(duration_sec=1.0, sample_rate=16000)
         res_dummy = client.transcribe_bytes(dummy_wav, filename="synthetic_test.wav")
-        
         print(f"Synthetic Audio Size : {len(dummy_wav)} bytes")
         print(f"API Latency          : {res_dummy.stt_latency_ms} ms")
         print(f"Status               : {res_dummy.status.upper()}")
         if res_dummy.transcript:
             print(f"Transcript           : \"{res_dummy.transcript}\"")
-        print("-" * 70)
-
-    print("\n" + "=" * 70)
-    print("STT CLIENT VERIFICATION COMPLETED.")
-    print("=" * 70 + "\n")
 
 
 if __name__ == "__main__":

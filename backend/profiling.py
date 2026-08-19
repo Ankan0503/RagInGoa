@@ -1,27 +1,14 @@
 #!/usr/bin/env python3
 """
 Stage-Level Latency Profiler (profiling.py)
-===========================================
-HH Goa 2026 Task 2, requirement 3/4.
-
-The brief scopes the 200ms budget as "chunking + vector DB retrieval + everything
-through to final output". Speech-to-text sits BEFORE that boundary, so it is
-measured and reported but excluded from the budget total. Every stage declares
-which side of the line it is on, so the two numbers can never be quietly mixed --
-which is exactly the failure the old `total < 200 or first_token < 200` check had.
-
-Every stage is timed individually and the sum is reconciled against wall clock.
-The difference is reported as `unaccounted`, so time spent somewhere nobody
-instrumented shows up instead of hiding.
 """
 
 from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Iterator
-
 
 DEFAULT_BUDGET_MS = 200.0
 
@@ -39,24 +26,12 @@ class Stage:
 
 
 class Profiler:
-    """
-    Usage:
-        p = Profiler()
-        with p.stage("embed_query"):
-            vec = encode(q)
-        with p.stage("stt", in_budget=False):
-            text = transcribe(audio)
-        print(p.table())
-    """
-
     def __init__(self, budget_ms: float = DEFAULT_BUDGET_MS, label: str = ""):
         self.budget_ms = budget_ms
         self.label = label
         self.stages: List[Stage] = []
         self._wall_start = time.perf_counter()
         self._closed_at: Optional[float] = None
-
-    # ---------------------------------------------------------------- record
 
     @contextmanager
     def stage(self, name: str, in_budget: bool = True, detail: str = "") -> Iterator[Stage]:
@@ -69,11 +44,9 @@ class Profiler:
             self.stages.append(st)
 
     def record(self, name: str, ms: float, in_budget: bool = True, detail: str = "") -> None:
-        """Add a stage timed elsewhere (e.g. returned by a sub-component)."""
         self.stages.append(Stage(name=name, ms=float(ms), in_budget=in_budget, detail=detail))
 
     def merge(self, stages: List[Stage], prefix: str = "") -> None:
-        """Fold a sub-profiler's stages in, optionally namespaced."""
         for s in stages:
             self.stages.append(Stage(name=f"{prefix}{s.name}", ms=s.ms,
                                      in_budget=s.in_budget, detail=s.detail))
@@ -82,8 +55,6 @@ class Profiler:
         if self._closed_at is None:
             self._closed_at = time.perf_counter()
 
-    # ------------------------------------------------------------- totals
-
     @property
     def wall_ms(self) -> float:
         end = self._closed_at if self._closed_at is not None else time.perf_counter()
@@ -91,7 +62,6 @@ class Profiler:
 
     @property
     def budget_ms_used(self) -> float:
-        """Sum of stages inside the 200ms boundary. This is the number that matters."""
         return sum(s.ms for s in self.stages if s.in_budget)
 
     @property
@@ -100,7 +70,6 @@ class Profiler:
 
     @property
     def unaccounted_ms(self) -> float:
-        """Wall clock minus every measured stage. Large values mean missing instrumentation."""
         return max(0.0, self.wall_ms - (self.budget_ms_used + self.excluded_ms))
 
     @property
@@ -110,8 +79,6 @@ class Profiler:
     def slowest(self, n: int = 3) -> List[Stage]:
         return sorted([s for s in self.stages if s.in_budget],
                       key=lambda s: s.ms, reverse=True)[:n]
-
-    # -------------------------------------------------------------- output
 
     def report(self) -> Dict[str, Any]:
         budget = self.budget_ms_used
@@ -155,14 +122,13 @@ class Profiler:
         excluded = [s for s in self.stages if not s.in_budget]
         if excluded:
             add("")
-            add("  excluded from the 200ms budget (upstream of chunking):")
+            add("  excluded from budget (upstream of chunking):")
             for s in excluded:
                 add(f"    {s.name:<24}{s.ms:>10.2f}")
 
         if self.unaccounted_ms > 0.5:
             add("")
-            add(f"  {'unaccounted':<26}{self.unaccounted_ms:>10.2f}"
-                f"   <- time not covered by any stage")
+            add(f"  {'unaccounted':<26}{self.unaccounted_ms:>10.2f}")
 
         add("")
         add(f"  {'wall clock':<26}{self.wall_ms:>10.2f}")
@@ -185,10 +151,6 @@ class Profiler:
         return out + f" | wall={self.wall_ms:.1f}ms {'PASS' if self.passed else 'OVER'}"
 
 
-# ============================================================================
-# AGGREGATION  (used by benchmark.py for per-stage percentiles)
-# ============================================================================
-
 def percentile(values: List[float], p: float) -> float:
     if not values:
         return 0.0
@@ -202,8 +164,6 @@ def percentile(values: List[float], p: float) -> float:
 
 
 class ProfileAggregator:
-    """Collects many Profiler runs and produces per-stage percentiles."""
-
     def __init__(self, budget_ms: float = DEFAULT_BUDGET_MS):
         self.budget_ms = budget_ms
         self.by_stage: Dict[str, List[float]] = {}
@@ -289,10 +249,6 @@ class ProfileAggregator:
         lines.append("=" * width)
         return "\n".join(lines)
 
-
-# ============================================================================
-# SELF-TEST
-# ============================================================================
 
 if __name__ == "__main__":
     import sys

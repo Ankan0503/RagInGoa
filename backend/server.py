@@ -1,52 +1,6 @@
 #!/usr/bin/env python3
 """
 Indic Voice RAG Server (server.py)
-==================================
-HH Goa 2026 Task 2 — requirements 5 (harness) and 6 (guardrails).
-
-HARNESS
--------
-Every external call runs through `call_with_retry`: bounded attempts, exponential
-backoff with jitter, a per-stage deadline, and typed exceptions. A stage that
-fails degrades rather than 500s — if generation dies we still return the
-retrieved passages, because sources with "generation unavailable" is a far more
-useful failure than an error page.
-
-GUARDRAILS
-----------
-Four gates from guardrails.py sit in the request path:
-    input      -> before retrieval   (empty / oversized / unsafe / injection)
-    retrieval  -> after search        (nothing found, or nothing close enough)
-    output     -> after generation    (prompt leakage, empty)
-    grounding  -> after generation    (claims unsupported by context)
-A blocked request returns a structured refusal with a machine-readable reason,
-not an error and not an invented answer.
-
-LATENCY REPORTING
------------------
-The old build reported `sla_passed = total < 200 OR first_token < 200`, which let
-a 400ms request claim success. That is gone.
-
-Every step is now timed individually by profiling.Profiler and reported as an
-ordered list, each flagged in_budget or not:
-
-    stt              excluded  - runs BEFORE the "chunking + retrieval" boundary
-    guard_input      in budget
-    query_normalize  in budget
-    embed_query      in budget
-    search_dense     in budget
-    bm25_encode      in budget
-    search_sparse    in budget
-    fusion_rrf       in budget
-    parent_fetch     in budget
-    guard_retrieval  in budget
-    prompt_build     in budget
-    llm_generate     in budget
-    guard_answer     in budget
-
-`in_budget_ms` is the headline number checked against 200ms. `unaccounted_ms`
-reconciles the stage sum against wall clock, so time spent anywhere nobody
-instrumented is visible rather than hidden.
 """
 
 from __future__ import annotations
@@ -62,7 +16,7 @@ from typing import Optional, List, Dict, Any, Callable, Awaitable, TypeVar
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -94,41 +48,27 @@ logging.basicConfig(
 logger = logging.getLogger("RAGServer")
 
 
-# ============================================================================
-# TUNING
-# ============================================================================
-
 class Limits:
-    STT_TIMEOUT_S      = float(os.getenv("STT_TIMEOUT_S", "8.0"))
-    LLM_TIMEOUT_S      = float(os.getenv("LLM_TIMEOUT_S", "6.0"))
-    STT_ATTEMPTS       = int(os.getenv("STT_ATTEMPTS", "2"))
-    LLM_ATTEMPTS       = int(os.getenv("LLM_ATTEMPTS", "3"))
-    BACKOFF_BASE_S     = 0.15
+    STT_TIMEOUT_S       = float(os.getenv("STT_TIMEOUT_S", "8.0"))
+    LLM_TIMEOUT_S       = float(os.getenv("LLM_TIMEOUT_S", "6.0"))
+    STT_ATTEMPTS        = int(os.getenv("STT_ATTEMPTS", "2"))
+    LLM_ATTEMPTS        = int(os.getenv("LLM_ATTEMPTS", "3"))
+    BACKOFF_BASE_S      = 0.15
     MIN_RETRIEVAL_SCORE = float(os.getenv("MIN_RETRIEVAL_SCORE", "0.80"))
-    # 0.0 = inert (margin is never negative, so the check always passes) until
-    # calibrated. See guardrails.RetrievalGate for why the absolute floor alone
-    # cannot separate real from off-topic queries on this index.
-    MIN_SCORE_MARGIN   = float(os.getenv("MIN_SCORE_MARGIN", "0.0"))
-    MIN_GROUNDING      = float(os.getenv("MIN_GROUNDING_OVERLAP", "0.45"))
-    MAX_QUERY_CHARS    = int(os.getenv("MAX_QUERY_CHARS", "512"))
-    MAX_TOKENS         = int(os.getenv("MAX_TOKENS", "48"))
+    MIN_SCORE_MARGIN    = float(os.getenv("MIN_SCORE_MARGIN", "0.0"))
+    MIN_GROUNDING       = float(os.getenv("MIN_GROUNDING_OVERLAP", "0.45"))
+    MAX_QUERY_CHARS     = int(os.getenv("MAX_QUERY_CHARS", "512"))
+    MAX_TOKENS          = int(os.getenv("MAX_TOKENS", "48"))
 
-
-# ============================================================================
-# SCHEMAS
-# ============================================================================
 
 class TextQueryRequest(BaseModel):
     query: str = Field(..., description="User query in Hindi, English, or code-mixed")
     top_k: int = Field(3, ge=1, le=10)
     strategy: Optional[str] = None
-    query_type: Optional[str] = Field(None, description="DESCRIPTION / NUMERIC / ENTITY / PERSON / LOCATION")
+    query_type: Optional[str] = Field(None, description="Query type metadata")
     temperature: float = Field(0.0, ge=0.0, le=1.0)
     max_tokens: int = Field(Limits.MAX_TOKENS, ge=8, le=512)
-    provider: Optional[str] = Field(
-        None, description="Override the LLM backend for this request ('groq' or "
-                          "'sarvam'). Lets both be A/B benchmarked against one "
-                          "running server instead of restarting between runs.")
+    provider: Optional[str] = Field(None, description="LLM provider ('groq' or 'sarvam')")
 
 
 class GuardrailReport(BaseModel):
@@ -151,27 +91,15 @@ class StageTiming(BaseModel):
 
 
 class LatencyBreakdown(BaseModel):
-    """
-    Every stage, individually timed, with an explicit in/out-of-budget flag.
-
-    The brief scopes the 200ms target as "chunking + vector DB retrieval +
-    everything through to final output". Speech-to-text runs BEFORE that boundary,
-    so it is measured and reported but marked in_budget=False and never folded
-    into the headline number.
-    """
-    stages: List[StageTiming] = Field(default_factory=list,
-                                      description="Ordered, exact per-step timings")
-
-    in_budget_ms: float = Field(0.0, description="Sum of stages inside the 200ms target")
-    excluded_ms: float = Field(0.0, description="Upstream stages (STT) — reported, not counted")
-    unaccounted_ms: float = Field(0.0, description="Wall clock not covered by any stage")
-    wall_ms: float = Field(0.0, description="Honest end-to-end wall clock")
-
+    stages: List[StageTiming] = Field(default_factory=list, description="Ordered per-step timings")
+    in_budget_ms: float = Field(0.0, description="Sum of stages inside 200ms target")
+    excluded_ms: float = Field(0.0, description="Upstream stages (STT)")
+    unaccounted_ms: float = Field(0.0, description="Wall clock unaccounted delta")
+    wall_ms: float = Field(0.0, description="End-to-end wall clock")
     budget_used_pct: float = 0.0
     under_200ms: bool = False
     bottleneck: Optional[str] = Field(None, description="Slowest in-budget stage")
 
-    # convenience roll-ups (all derived from `stages`, never independently measured)
     stt_ms: Optional[float] = None
     embed_ms: float = 0.0
     search_ms: float = 0.0
@@ -183,14 +111,11 @@ class LatencyBreakdown(BaseModel):
     tokens_per_second: float = 0.0
     llm_attempts: int = 0
     degraded: bool = False
-    # Which backend actually served this request. Recorded so an A/B benchmark's
-    # results are self-labelling and cannot be mixed up after the fact.
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
 
 
 def _breakdown_from(prof: Profiler, **extra) -> LatencyBreakdown:
-    """Single source of truth: every reported number comes from the profiler."""
     prof.close()
     rep = prof.report()
 
@@ -229,10 +154,6 @@ class QueryResponse(BaseModel):
     metrics: LatencyBreakdown
 
 
-# ============================================================================
-# PROMPT
-# ============================================================================
-
 SYSTEM_PROMPT_TEMPLATE = """आप एक तथ्यपरक सहायक हैं। नीचे दिए गए संदर्भ के आधार पर ही उत्तर दें।
 
 नियम:
@@ -245,10 +166,6 @@ SYSTEM_PROMPT_TEMPLATE = """आप एक तथ्यपरक सहायक 
 संदर्भ:
 {context}"""
 
-
-# ============================================================================
-# RETRY HARNESS
-# ============================================================================
 
 T = TypeVar("T")
 
@@ -267,13 +184,6 @@ async def call_with_retry(
     timeout_s: float,
     retry_on: tuple = (Exception,),
 ) -> tuple[T, int]:
-    """
-    Bounded retry with exponential backoff and jitter.
-
-    Returns (result, attempts_used). Raises StageError when every attempt fails,
-    so callers can distinguish "STT broke" from "LLM broke" from "index broke"
-    instead of catching one undifferentiated Exception.
-    """
     last: Optional[BaseException] = None
     for attempt in range(1, attempts + 1):
         try:
@@ -292,24 +202,15 @@ async def call_with_retry(
     raise StageError(stage, str(last), attempts)
 
 
-# ============================================================================
-# APP STATE
-# ============================================================================
-
 class AppState:
     retriever: Optional[IndicRetriever] = None
     stt_client: Optional[SarvamSTTClient] = None
-    llm: Optional[BaseLLM] = None                     # default backend
-    llm_pool: Dict[str, BaseLLM] = {}                 # provider -> client, lazily built
+    llm: Optional[BaseLLM] = None
+    llm_pool: Dict[str, BaseLLM] = {}
     guards: Optional[GuardrailPipeline] = None
-    index_error: Optional[str] = None      # non-None => index is unusable
+    index_error: Optional[str] = None
 
     def get_llm(self, provider: Optional[str]) -> Optional[BaseLLM]:
-        """
-        Resolve the backend for one request. Clients are cached per provider so an
-        A/B run reuses warm, pooled TLS connections for both — otherwise the second
-        provider would be unfairly charged a handshake on every query.
-        """
         if not provider:
             return self.llm
         key = provider.lower().strip()
@@ -324,45 +225,30 @@ state = AppState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("=" * 70)
     logger.info("INDIC VOICE RAG SERVER — STARTUP")
-    logger.info("=" * 70)
 
-    # 1. retriever ----------------------------------------------------------
-    # strict=True means a missing or mismatched index raises here instead of
-    # producing a server that reports itself healthy and answers nothing.
     try:
         state.retriever = IndicRetriever(
             qdrant_path=os.getenv("QDRANT_PATH", "./qdrant_data"),
             embedding_model=os.getenv("EMBEDDING_MODEL") or None,
             strict=True,
         )
-        logger.info(f"Retriever ready | mode={state.retriever.mode} "
-                    f"| model={state.retriever.embedding_model_name}")
+        logger.info(f"Retriever ready | mode={state.retriever.mode} | model={state.retriever.embedding_model_name}")
     except (IndexUnavailableError, IndexMismatchError) as e:
         state.index_error = str(e)
-        logger.error("=" * 70)
         logger.error(f"INDEX UNUSABLE: {e}")
-        logger.error("The server will start but /health reports unhealthy and all "
-                     "queries return 503. This is deliberate — a silent empty index "
-                     "is worse than a loud failure.")
-        logger.error("=" * 70)
     except RetrieverError as e:
         state.index_error = str(e)
         logger.error(f"Retriever init failed: {e}")
 
-    # 2. guardrails ---------------------------------------------------------
     state.guards = GuardrailPipeline(
         min_retrieval_score=Limits.MIN_RETRIEVAL_SCORE,
         min_score_margin=Limits.MIN_SCORE_MARGIN,
         min_grounding_overlap=Limits.MIN_GROUNDING,
         max_query_chars=Limits.MAX_QUERY_CHARS,
     )
-    logger.info(f"Guardrails armed | retrieval floor={Limits.MIN_RETRIEVAL_SCORE} "
-                f"| score margin floor={Limits.MIN_SCORE_MARGIN} "
-                f"| grounding floor={Limits.MIN_GROUNDING}")
+    logger.info("Guardrails armed")
 
-    # 3. STT ----------------------------------------------------------------
     sarvam_key = os.getenv("SARVAM_API_KEY")
     if sarvam_key:
         state.stt_client = SarvamSTTClient(
@@ -371,31 +257,24 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("SARVAM_API_KEY missing — voice input disabled")
 
-    # 4. LLM ----------------------------------------------------------------
-    # Provider is config, not code: LLM_PROVIDER=groq|sarvam. Geography usually
-    # matters more than model size for this stage, so both are benchmarkable.
     try:
         state.llm = build_llm(timeout_s=Limits.LLM_TIMEOUT_S)
         state.llm_pool[state.llm.provider] = state.llm
         logger.info(f"LLM ready | {state.llm.provider} / {state.llm.model}")
     except LLMError as e:
-        logger.warning(f"{e} — generation disabled (retrieval-only mode)")
+        logger.warning(f"{e} — generation disabled")
 
-    # 5. warmup -------------------------------------------------------------
     if state.retriever and not state.index_error:
         try:
             await asyncio.get_running_loop().run_in_executor(
                 None, lambda: state.retriever.retrieve("वार्मअप", top_k=1))
             if state.llm:
-                # Opens the TLS connection so the first real query does not pay
-                # for a handshake inside the latency budget.
                 await state.llm.generate(
                     [{"role": "user", "content": "1"}], temperature=0.0, max_tokens=1)
-            logger.info("Warmup complete — ONNX session, HNSW index and HTTP pool primed")
+            logger.info("Warmup complete")
         except Exception as e:
             logger.warning(f"Warmup incomplete: {e}")
 
-    logger.info("=" * 70)
     yield
     logger.info("Shutting down.")
 
@@ -407,9 +286,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# allow_credentials=True with allow_origins=["*"] is rejected outright by every
-# browser. This API is token-authenticated, not cookie-authenticated, so
-# credentials are simply off and the wildcard becomes valid.
 _origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -420,17 +296,11 @@ app.add_middleware(
 )
 
 
-# ============================================================================
-# HELPERS
-# ============================================================================
-
 def _require_index():
     if state.index_error or not state.retriever:
         raise HTTPException(status_code=503, detail={
             "error": "index_unavailable",
             "message": state.index_error or "Retriever not initialised.",
-            "hint": "Build the index with build_index_gpu.py and place qdrant_data/, "
-                    "parents.sqlite and index_manifest.json in backend/.",
         })
 
 
@@ -463,15 +333,10 @@ def _refusal_response(query: str, verdict: Verdict, metrics: LatencyBreakdown,
 
 async def _retrieve_async(query: str, top_k: int, strategy: Optional[str],
                           query_type: Optional[str]) -> RetrievalResult:
-    """Qdrant local mode is synchronous; keep it off the event loop."""
     return await asyncio.get_running_loop().run_in_executor(
         None, lambda: state.retriever.retrieve(
             query=query, top_k=top_k, strategy=strategy, query_type=query_type))
 
-
-# ============================================================================
-# HEALTH
-# ============================================================================
 
 @app.get("/health")
 async def health_check():
@@ -506,9 +371,6 @@ async def health_check():
         body["vector_store"] = {
             "collection": r.collection_name,
             "mode": r.mode,
-            # "server" (HNSW, mmap) vs "local" (brute force, all-RAM). Measured at
-            # 680k vectors, local mode is ~11s per query — so this is the single
-            # most important field for diagnosing a slow deployment.
             "transport": r.transport,
             "qdrant_url": r.qdrant_url,
             "points_count": getattr(r, "points_count", 0),
@@ -518,21 +380,11 @@ async def health_check():
             "parent_passages": r.parents.count if r.parents else None,
         }
 
-    # A degraded service must not answer 200 to a liveness probe.
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=200 if healthy else 503, content=body)
 
 
-# ============================================================================
-# ADMIN  (POST only, token required, disabled by default)
-# ============================================================================
-
 def require_admin(x_admin_token: str = Header(default="")):
-    """
-    The previous version accepted GET, required no auth, and honoured
-    recreate=true — so any crawler or prefetched link could drop the collection.
-    With ADMIN_TOKEN unset the endpoint is off entirely.
-    """
     expected = os.getenv("ADMIN_TOKEN", "")
     if not expected:
         raise HTTPException(status_code=404, detail="Admin endpoints are disabled.")
@@ -540,24 +392,6 @@ def require_admin(x_admin_token: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or missing X-Admin-Token.")
     return True
 
-
-# NOTE: /api/admin/reindex has been removed.
-#
-# It called ingest_pipeline.IndicRAGIndexer, which upserts points with an
-# UNNAMED vector. Indexes built by build_index_gpu.py use named vectors
-# ("dense") plus a named sparse vector ("bm25"), so every upsert would be
-# rejected by Qdrant. The endpoint could not have worked against the current
-# schema, and a live-reindex path that silently half-writes into a serving
-# collection is not something worth repairing under a deadline.
-#
-# Index building now happens exclusively through backend/build_index_gpu.py on
-# a GPU host, with the result shipped as a Qdrant snapshot. That path is
-# resumable, fingerprint-checked and verified for GPU/CPU vector parity.
-
-
-# ============================================================================
-# CORE PIPELINE
-# ============================================================================
 
 async def run_rag_pipeline(
     query: str,
@@ -570,26 +404,17 @@ async def run_rag_pipeline(
     transcript: Optional[str] = None,
     provider: Optional[str] = None,
 ) -> QueryResponse:
-    """
-    Gate -> retrieve -> gate -> generate -> gate, with every step individually
-    timed. `prof` is the single source of every latency number reported; nothing
-    is measured twice or estimated.
-    """
     prof = Profiler(budget_ms=DEFAULT_BUDGET_MS, label="rag")
 
-    # Speech-to-text already happened upstream. Recorded for visibility, flagged
-    # out-of-budget because it precedes the "chunking + retrieval" boundary.
     if stt_ms is not None:
         prof.record("stt", stt_ms, in_budget=False, detail="Sarvam API round trip")
 
-    # ---- gate 1: input ----------------------------------------------------
     with prof.stage("guard_input"):
         v_in = state.guards.check_input(query)
     if not v_in.allowed:
         logger.info(f"[REFUSED:{v_in.reason.value}] {query!r} — {v_in.detail}")
         return _refusal_response(query, v_in, _breakdown_from(prof), transcript=transcript)
 
-    # ---- retrieval (profiled internally: normalize/embed/search/fuse/parent) --
     try:
         rr: RetrievalResult = await asyncio.get_running_loop().run_in_executor(
             None, lambda: state.retriever.retrieve(
@@ -597,17 +422,13 @@ async def run_rag_pipeline(
                 query_type=query_type, profiler=prof))
     except SearchFailedError as e:
         logger.error(f"Search failed: {e}")
-        raise HTTPException(status_code=503, detail={
-            "error": "search_failed", "message": str(e)})
+        raise HTTPException(status_code=503, detail={"error": "search_failed", "message": str(e)})
 
-    # ---- gate 2: retrieval ------------------------------------------------
     with prof.stage("guard_retrieval"):
         v_ret = state.guards.check_retrieval(
             [h.raw_score for h in rr.hits], margin=rr.score_margin)
     if not v_ret.allowed:
         logger.info(f"[REFUSED:{v_ret.reason.value}] {query!r} — {v_ret.detail}")
-        # Sources still returned: "closest thing I found, not close enough to
-        # answer from" beats a bare refusal.
         return _refusal_response(query, v_ret, _breakdown_from(prof),
                                  sources=rr.hits, transcript=transcript)
 
@@ -618,7 +439,6 @@ async def run_rag_pipeline(
             {"role": "user", "content": f"प्रश्न: {query}"},
         ]
 
-    # ---- generation (degrades instead of failing) -------------------------
     answer = ""
     degraded = False
     attempts_used = 0
@@ -627,16 +447,14 @@ async def run_rag_pipeline(
     try:
         llm = state.get_llm(provider)
     except LLMError as e:
-        raise HTTPException(status_code=400, detail={
-            "error": "unknown_provider", "message": str(e)})
+        raise HTTPException(status_code=400, detail={"error": "unknown_provider", "message": str(e)})
 
     if llm is None:
         degraded = True
         answer = "उत्तर निर्माण सेवा उपलब्ध नहीं है। नीचे प्राप्त संदर्भ देखें।"
     else:
         async def _generate():
-            return await llm.generate(messages, temperature=temperature,
-                                      max_tokens=max_tokens)
+            return await llm.generate(messages, temperature=temperature, max_tokens=max_tokens)
 
         with prof.stage("llm_generate") as st:
             try:
@@ -644,15 +462,7 @@ async def run_rag_pipeline(
                     "llm", _generate, Limits.LLM_ATTEMPTS, Limits.LLM_TIMEOUT_S)
                 answer = res.text
                 tokens = res.completion_tokens or len(answer.split())
-                st.detail = (f"{llm.provider} {tokens} tok, "
-                             f"{attempts_used} attempt(s)")
-                if res.reasoning_tokens:
-                    # Reasoning tokens are pure latency for a RAG lookup and eat
-                    # into max_tokens. If this is ever non-zero, thinking mode is
-                    # still on -- set SARVAM_REASONING_EFFORT=none.
-                    logger.warning(f"{res.reasoning_tokens} reasoning tokens spent — "
-                                   f"thinking mode appears to still be enabled")
-                    st.detail += f", {res.reasoning_tokens} reasoning"
+                st.detail = f"{llm.provider} {tokens} tok, {attempts_used} attempt(s)"
             except StageError as e:
                 logger.error(str(e))
                 degraded = True
@@ -660,7 +470,6 @@ async def run_rag_pipeline(
                 answer = "उत्तर निर्माण अभी विफल रहा। नीचे प्राप्त संदर्भ उपलब्ध है।"
                 st.detail = f"FAILED after {attempts_used} attempts"
 
-    # ---- gates 3 & 4: output hygiene + grounding --------------------------
     grounding_score = None
     grounding_passed = True
     if not degraded:
@@ -680,7 +489,6 @@ async def run_rag_pipeline(
         m.tokens_per_second = round(tokens / (m.generation_ms / 1000.0), 2)
 
     logger.info(f"[RAG] {query!r} -> {answer!r}")
-    logger.info(f"[LATENCY] {prof.one_line()}")
 
     return QueryResponse(
         query=query,
@@ -697,10 +505,6 @@ async def run_rag_pipeline(
     )
 
 
-# ============================================================================
-# REST
-# ============================================================================
-
 @app.post("/api/text-query", response_model=QueryResponse)
 async def process_text_query(req: TextQueryRequest):
     _require_index()
@@ -710,10 +514,6 @@ async def process_text_query(req: TextQueryRequest):
         max_tokens=req.max_tokens, provider=req.provider,
     )
 
-
-# ============================================================================
-# WEBSOCKET
-# ============================================================================
 
 @app.websocket("/ws/voice-rag")
 async def websocket_voice_rag(websocket: WebSocket):
@@ -727,7 +527,6 @@ async def websocket_voice_rag(websocket: WebSocket):
             if message.get("type") == "websocket.disconnect":
                 break
 
-            # Each message is isolated: one bad request must not kill the socket.
             try:
                 await _handle_ws_message(websocket, message)
             except WebSocketDisconnect:
@@ -736,8 +535,7 @@ async def websocket_voice_rag(websocket: WebSocket):
                 await websocket.send_json({"type": "error", "message": str(e.detail)})
             except Exception as e:
                 logger.error(f"WS message failed: {e}", exc_info=True)
-                await websocket.send_json({
-                    "type": "error", "message": f"अनुरोध विफल: {e}"})
+                await websocket.send_json({"type": "error", "message": f"अनुरोध विफल: {e}"})
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
@@ -773,14 +571,12 @@ async def _handle_ws_message(websocket: WebSocket, message: Dict[str, Any]):
 
     _require_index()
 
-    # ---- STT --------------------------------------------------------------
     stt_ms: Optional[float] = None
     transcript: Optional[str] = None
 
     if audio_bytes:
         if not state.stt_client:
-            await websocket.send_json({
-                "type": "error", "message": "वॉइस सेवा कॉन्फ़िगर नहीं है।"})
+            await websocket.send_json({"type": "error", "message": "वॉइस सेवा कॉन्फ़िगर नहीं है।"})
             return
 
         await websocket.send_json({"type": "status", "stage": "transcribing"})
@@ -797,17 +593,13 @@ async def _handle_ws_message(websocket: WebSocket, message: Dict[str, Any]):
                 "stt", _stt, Limits.STT_ATTEMPTS, Limits.STT_TIMEOUT_S)
         except StageError as e:
             logger.error(str(e))
-            await websocket.send_json({
-                "type": "error",
-                "message": "आवाज़ पहचानी नहीं जा सकी। कृपया दोबारा बोलें।"})
+            await websocket.send_json({"type": "error", "message": "आवाज़ पहचानी नहीं जा सकी। कृपया दोबारा बोलें।"})
             return
 
         stt_ms = stt_res.stt_latency_ms
         transcript = text_query = stt_res.transcript
-        await websocket.send_json({
-            "type": "transcript", "text": transcript, "stt_latency_ms": stt_ms})
+        await websocket.send_json({"type": "transcript", "text": transcript, "stt_latency_ms": stt_ms})
 
-    # ---- pipeline ---------------------------------------------------------
     await websocket.send_json({"type": "status", "stage": "retrieving"})
 
     result = await run_rag_pipeline(
@@ -823,8 +615,6 @@ async def _handle_ws_message(websocket: WebSocket, message: Dict[str, Any]):
         "sources": [h.model_dump() for h in result.sources],
     })
 
-    # Refusals and answers both arrive as tokens so the UI renders them the same
-    # way; the `done` frame carries the reason code.
     await websocket.send_json({"type": "status", "stage": "generating"})
     for piece in _chunk_text(result.answer):
         await websocket.send_json({"type": "token", "delta": piece})
@@ -843,14 +633,9 @@ async def _handle_ws_message(websocket: WebSocket, message: Dict[str, Any]):
 
 
 def _chunk_text(text: str, size: int = 12):
-    """Split a completed answer into UI-sized pieces for the existing token UI."""
     for i in range(0, len(text or ""), size):
         yield text[i:i + size]
 
-
-# ============================================================================
-# FRONTEND
-# ============================================================================
 
 frontend_dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
 if os.path.isdir(os.path.join(frontend_dist, "assets")):
