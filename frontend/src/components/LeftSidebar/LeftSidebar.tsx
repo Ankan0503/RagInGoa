@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import { Mic, BarChart2, Info, X } from "lucide-react";
 
 // Types for Navigation Items
@@ -16,10 +16,14 @@ interface LeftSidebarProps {
   // before this component ever took props.
   isOpen: boolean;
   onClose: () => void;
+  // Which section App.tsx renders in the main column. Lifted up from what
+  // used to be local state here, so a nav click actually changes the page
+  // instead of just highlighting the button.
+  activeId: string;
+  onNavigate: (id: string) => void;
 }
 
-export default function LeftSidebar({ isOpen, onClose }: LeftSidebarProps) {
-  const [activeId, setActiveId] = useState<string>("ask");
+export default function LeftSidebar({ isOpen, onClose, activeId, onNavigate }: LeftSidebarProps) {
 
   const navItems: NavItem[] = [
     {
@@ -195,7 +199,7 @@ export default function LeftSidebar({ isOpen, onClose }: LeftSidebarProps) {
               key={item.id}
               id={`nav-item-${item.id}`}
               onClick={() => {
-                setActiveId(item.id);
+                onNavigate(item.id);
                 onClose();
               }}
               className={`

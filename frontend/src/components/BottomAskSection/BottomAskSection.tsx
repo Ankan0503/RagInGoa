@@ -52,7 +52,7 @@ export default function BottomAskSection() {
 
       {/* Signature */}
       <div className="built-in-goa">
-        Built with <span className="goa-heart">❤️</span> in Goa 🌴
+        Built with <span className="goa-heart">❤️</span> for Goa 🌴
       </div>
     </div>
   );

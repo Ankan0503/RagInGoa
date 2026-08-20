@@ -8,6 +8,7 @@ import { Menu } from "lucide-react";
 import LeftSidebar from "./components/LeftSidebar/LeftSidebar";
 import AskHero from "./components/AskHero/AskHero";
 import AnswerPanel from "./components/AnswerPanel/AnswerPanel";
+import AboutSection from "./components/AboutSection/AboutSection";
 import { RagProvider } from "./context/RagContext";
 
 export default function App() {
@@ -15,6 +16,10 @@ export default function App() {
   // drawer below lg (new). This state only matters below lg -- LeftSidebar
   // ignores it at lg+ via its own md:/lg: classes.
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  // Which section the main column shows. "insights" has no dedicated view
+  // yet, so it falls through to the Ask layout below rather than a blank page.
+  const [activeSection, setActiveSection] = useState("ask");
 
   return (
     <RagProvider>
@@ -56,18 +61,32 @@ export default function App() {
           )}
 
           {/* Left Sidebar navigation panel -- drawer below lg, static at lg+ */}
-          <LeftSidebar isOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
+          <LeftSidebar
+            isOpen={mobileNavOpen}
+            onClose={() => setMobileNavOpen(false)}
+            activeId={activeSection}
+            onNavigate={(id) => {
+              setActiveSection(id);
+              setMobileNavOpen(false);
+            }}
+          />
 
           {/* Scrollable central and rightward workspace column cluster */}
           <div
             id="main-scroll-wrapper"
             className="flex-1 h-full overflow-y-auto flex flex-col lg:flex-row items-start justify-start relative"
           >
-            {/* Main interactive content area - AskHero */}
-            <AskHero />
+            {activeSection === "about" ? (
+              <AboutSection />
+            ) : (
+              <>
+                {/* Main interactive content area - AskHero */}
+                <AskHero />
 
-            {/* Right Answer/Results Panel */}
-            <AnswerPanel />
+                {/* Right Answer/Results Panel */}
+                <AnswerPanel />
+              </>
+            )}
           </div>
         </div>
       </div>
