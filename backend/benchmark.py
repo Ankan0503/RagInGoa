@@ -282,11 +282,15 @@ def run_local(queries: List[Dict[str, str]], top_k: int) -> Dict[str, Any]:
 
 def run_server(queries: List[Dict[str, str]], url: str, top_k: int,
                provider: Optional[str] = None,
+               model: Optional[str] = None,
                timeout_s: float = 30.0) -> Dict[str, Any]:
     import httpx
 
     endpoint = url.rstrip("/") + "/api/text-query"
-    tag = f"  [provider={provider}]" if provider else ""
+    tag_bits = [f"provider={provider}"] if provider else []
+    if model:
+        tag_bits.append(f"model={model}")
+    tag = f"  [{', '.join(tag_bits)}]" if tag_bits else ""
 
     try:
         h = httpx.get(url.rstrip("/") + "/health", timeout=5.0)
@@ -330,6 +334,8 @@ def run_server(queries: List[Dict[str, str]], url: str, top_k: int,
             body: Dict[str, Any] = {"query": item["query"], "top_k": top_k}
             if provider:
                 body["provider"] = provider
+            if model:
+                body["model"] = model
             t0 = time.perf_counter()
             try:
                 resp = client.post(endpoint, json=body)
@@ -351,7 +357,7 @@ def run_server(queries: List[Dict[str, str]], url: str, top_k: int,
             stages["in_budget_total"].append(m.get("in_budget_ms", 0.0))
             stages["end_to_end"].append(wall)
 
-            got = m.get("llm_provider") or "unknown"
+            got = f"{m.get('llm_provider') or 'unknown'}/{m.get('llm_model') or '?'}"
             served_by[got] = served_by.get(got, 0) + 1
 
             if data.get("refused"):
@@ -370,6 +376,7 @@ def run_server(queries: List[Dict[str, str]], url: str, top_k: int,
         "mode": "server",
         "endpoint": endpoint,
         "provider_requested": provider,
+        "model_requested": model,
         "provider_served": served_by,
         "n_queries": len(stages["end_to_end"]),
         "refusals": refusals,
@@ -446,7 +453,7 @@ def print_comparison(results: List[Dict[str, Any]]):
     print("  PROVIDER COMPARISON")
     print("=" * W)
 
-    names = [r.get("provider_requested") or "default" for r in results]
+    names = [r.get("model_requested") or r.get("provider_requested") or "default" for r in results]
     print(f"  {'stage':<22}" + "".join(f"{n:>20}" for n in names))
     print("  " + "-" * (W - 4))
 
@@ -484,24 +491,34 @@ def main():
     ap.add_argument("--allow-dataset-download", action="store_true", help="Permit dataset download fallback")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--provider", type=str, default=None, help="Override LLM backend (groq|sarvam)")
+    ap.add_argument("--model", type=str, default=None, help="Override the provider's model for a single run")
     ap.add_argument("--compare", type=str, default=None, help="A/B providers (e.g. groq,sarvam)")
+    ap.add_argument("--compare-models", type=str, default=None,
+                    help="A/B/C models under one provider (e.g. --provider groq "
+                         "--compare-models qwen/qwen3-32b,openai/gpt-oss-20b,groq/compound-mini)")
     args = ap.parse_args()
 
     if not args.local and not args.server:
         args.local = True
 
-    if args.compare and not args.server:
-        sys.exit("--compare needs --server.")
+    if (args.compare or args.compare_models) and not args.server:
+        sys.exit("--compare / --compare-models needs --server.")
+    if args.compare and args.compare_models:
+        sys.exit("--compare and --compare-models are mutually exclusive -- pick one axis per run.")
 
     random.seed(args.seed)
     queries = load_dataset_queries(args.num_queries, seed=args.seed,
                                    allow_download=args.allow_dataset_download)
 
-    if args.compare:
-        providers = [p.strip() for p in args.compare.split(",") if p.strip()]
+    if args.compare or args.compare_models:
+        if args.compare:
+            axis = [(p.strip(), None) for p in args.compare.split(",") if p.strip()]
+        else:
+            axis = [(args.provider, m.strip()) for m in args.compare_models.split(",") if m.strip()]
+
         results = []
-        for prov in providers:
-            r = run_server(queries, args.server, args.top_k, provider=prov,
+        for prov, mdl in axis:
+            r = run_server(queries, args.server, args.top_k, provider=prov, model=mdl,
                            timeout_s=args.timeout)
             r["generated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             r["seed"] = args.seed
@@ -517,7 +534,7 @@ def main():
             print(f"\nFull results written to {args.json}\n")
         return
 
-    result = (run_server(queries, args.server, args.top_k, provider=args.provider)
+    result = (run_server(queries, args.server, args.top_k, provider=args.provider, model=args.model)
               if args.server else run_local(queries, args.top_k))
     result["generated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     result["seed"] = args.seed

@@ -71,6 +71,7 @@ class TextQueryRequest(BaseModel):
     temperature: float = Field(0.0, ge=0.0, le=1.0)
     max_tokens: int = Field(Limits.MAX_TOKENS, ge=8, le=512)
     provider: Optional[str] = Field(None, description="LLM provider ('groq' or 'sarvam')")
+    model: Optional[str] = Field(None, description="Override the provider's default model, e.g. for latency comparison")
 
 
 class GuardrailReport(BaseModel):
@@ -212,12 +213,15 @@ class AppState:
     guards: Optional[GuardrailPipeline] = None
     index_error: Optional[str] = None
 
-    def get_llm(self, provider: Optional[str]) -> Optional[BaseLLM]:
-        if not provider:
+    def get_llm(self, provider: Optional[str], model: Optional[str] = None) -> Optional[BaseLLM]:
+        if not provider and not model:
             return self.llm
-        key = provider.lower().strip()
+        provider_key = (provider or self.llm.provider if self.llm else "groq").lower().strip()
+        # Pool key includes the model so e.g. groq:qwen and groq:compound-mini
+        # coexist for a latency comparison instead of overwriting each other.
+        key = f"{provider_key}:{model}" if model else provider_key
         if key not in self.llm_pool:
-            self.llm_pool[key] = build_llm(key, timeout_s=Limits.LLM_TIMEOUT_S)
+            self.llm_pool[key] = build_llm(provider_key, timeout_s=Limits.LLM_TIMEOUT_S, model=model)
             logger.info(f"LLM backend added to pool: {key}")
         return self.llm_pool[key]
 
@@ -405,6 +409,7 @@ async def run_rag_pipeline(
     stt_ms: Optional[float] = None,
     transcript: Optional[str] = None,
     provider: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> QueryResponse:
     prof = Profiler(budget_ms=DEFAULT_BUDGET_MS, label="rag")
 
@@ -447,7 +452,7 @@ async def run_rag_pipeline(
     tokens = 0
 
     try:
-        llm = state.get_llm(provider)
+        llm = state.get_llm(provider, model)
     except LLMError as e:
         raise HTTPException(status_code=400, detail={"error": "unknown_provider", "message": str(e)})
 
@@ -517,6 +522,7 @@ async def run_rag_pipeline_streaming(
     stt_ms: Optional[float] = None,
     transcript: Optional[str] = None,
     provider: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """The same pipeline as run_rag_pipeline, yielded as events instead of
     returned as one object, so tokens reach the browser as the LLM produces
@@ -582,7 +588,7 @@ async def run_rag_pipeline_streaming(
     }
 
     try:
-        llm = state.get_llm(provider)
+        llm = state.get_llm(provider, model)
     except LLMError as e:
         yield {"type": "error", "message": str(e)}
         return
@@ -671,7 +677,7 @@ async def process_text_query(req: TextQueryRequest):
     return await run_rag_pipeline(
         query=req.query, top_k=req.top_k, strategy=req.strategy,
         query_type=req.query_type, temperature=req.temperature,
-        max_tokens=req.max_tokens, provider=req.provider,
+        max_tokens=req.max_tokens, provider=req.provider, model=req.model,
     )
 
 
@@ -840,6 +846,7 @@ async def _handle_ws_message(websocket: WebSocket, message: Dict[str, Any],
         stt_ms=payload.get("stt_latency_ms"),
         transcript=payload.get("transcript"),
         provider=payload.get("provider"),
+        model=payload.get("model"),
     ):
         if event["type"] == "token" and not generating_announced:
             generating_announced = True

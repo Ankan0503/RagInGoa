@@ -203,11 +203,12 @@ class SarvamLLM(BaseLLM):
 _PROVIDERS = {"groq": GroqLLM, "sarvam": SarvamLLM}
 
 
-def build_llm(provider: Optional[str] = None, timeout_s: float = 8.0) -> BaseLLM:
+def build_llm(provider: Optional[str] = None, timeout_s: float = 8.0,
+              model: Optional[str] = None) -> BaseLLM:
     name = (provider or os.getenv("LLM_PROVIDER", "groq")).lower().strip()
     if name not in _PROVIDERS:
         raise LLMError(f"Unknown LLM_PROVIDER '{name}'. Options: {', '.join(_PROVIDERS)}")
-    llm = _PROVIDERS[name](timeout_s=timeout_s)
+    llm = _PROVIDERS[name](model=model, timeout_s=timeout_s)
     logger.info(f"LLM backend: {llm.provider} | model={llm.model} | endpoint={llm.endpoint}")
     return llm
 
