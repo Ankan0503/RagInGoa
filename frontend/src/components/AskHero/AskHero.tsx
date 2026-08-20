@@ -76,10 +76,7 @@ export default function AskHero() {
     stopListening,
     selectedStrategy,
     setSelectedStrategy,
-    pendingTranscript,
-    awaitingSend,
-    sendPending,
-    discardPending
+    awaitingSend
   } = useRag();
 
   const [showDropdown, setShowDropdown] = useState(false);
@@ -228,44 +225,9 @@ export default function AskHero() {
 
           </div>
 
-          {/* Live transcript. Appears as Sarvam streams partials back, then
-              stays put with a Send button so the user can confirm they were
-              heard correctly before anything is retrieved or generated. */}
-          {(pendingTranscript || awaitingSend) && (
-            <div className="w-full max-w-[520px] mb-3 px-1">
-              <div className="flex items-center gap-2 mb-1.5">
-                <span className="font-sans text-[12px] font-medium text-[#176B4F] uppercase tracking-wide">
-                  {isListening ? "Hearing" : "You said"}
-                </span>
-                {isListening && (
-                  <span className="w-[6px] h-[6px] rounded-full bg-[#E55353] animate-pulse" />
-                )}
-              </div>
-              <p className="font-sans text-[15px] text-[#1B211E] leading-[1.5] bg-[#F7F9F6] border border-[#E4EAE2] rounded-[12px] px-3.5 py-2.5 min-h-[44px] break-words">
-                {pendingTranscript || (
-                  <span className="text-[#9AA39D]">सुन रहे हैं…</span>
-                )}
-              </p>
-
-              {awaitingSend && (
-                <div className="flex items-center gap-2 mt-2.5">
-                  <button
-                    onClick={sendPending}
-                    className="flex-1 h-[42px] rounded-[12px] bg-[#176B4F] text-white font-sans text-[15px] font-medium flex items-center justify-center gap-2 cursor-pointer hover:bg-[#14694F] active:scale-[0.99] transition-all duration-150 outline-none"
-                  >
-                    Send
-                    <span className="text-[16px]">→</span>
-                  </button>
-                  <button
-                    onClick={discardPending}
-                    className="h-[42px] px-4 rounded-[12px] border border-[#DADDD7] text-[#59635D] font-sans text-[14px] cursor-pointer hover:bg-[#F3F2ED] transition-colors duration-150 outline-none"
-                  >
-                    Retry
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
+          {/* Live transcript + Send/Retry now live in AnswerPanel next to
+              "You asked", not here -- keeping this column's height fixed so
+              it no longer pushes the dropdown below down while speaking. */}
 
           {/* Best Match Dropdown Component */}
           <div className="relative z-20">

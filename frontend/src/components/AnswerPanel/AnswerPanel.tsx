@@ -46,7 +46,10 @@ function SourceRow({ source }: { source: Source }) {
  * Right panel answer & evidence visualization element.
  */
 export default function AnswerPanel() {
-  const { query, answer, sources, metrics, groundingWarning } = useRag();
+  const {
+    query, answer, sources, metrics, groundingWarning,
+    pendingTranscript, awaitingSend, isListening, sendPending, discardPending
+  } = useRag();
 
   const displaySources: Source[] = sources.length > 0
     ? sources.slice(0, 3).map((s, idx) => ({
@@ -113,10 +116,50 @@ export default function AnswerPanel() {
           </div>
         </div>
 
-        {/* Row 2: Question text */}
-        <p className="font-sans font-normal text-[14.5px] text-[#1B211E] leading-[1.5] mt-[14px] pr-2">
-          “{displayQuery}”
-        </p>
+        {/* Row 2: Question text -- OR, while a spoken question is being
+            reviewed, the live/pending transcript with Send + Retry. This
+            used to live in AskHero above the Best Match dropdown, where its
+            appearing/disappearing height pushed that dropdown up and down.
+            It belongs next to "You asked" anyway, so it moved here instead. */}
+        {(pendingTranscript || awaitingSend) ? (
+          <div className="mt-[14px]">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="font-sans text-[11px] font-medium text-[#176B4F] uppercase tracking-wide">
+                {isListening ? "Hearing" : "You said"}
+              </span>
+              {isListening && (
+                <span className="w-[6px] h-[6px] rounded-full bg-[#E55353] animate-pulse" />
+              )}
+            </div>
+            <p className="font-sans text-[14.5px] text-[#1B211E] leading-[1.5] bg-[#F7F9F6] border border-[#E4EAE2] rounded-[10px] px-3 py-2 min-h-[40px] break-words">
+              {pendingTranscript || (
+                <span className="text-[#9AA39D]">सुन रहे हैं…</span>
+              )}
+            </p>
+
+            {awaitingSend && (
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  onClick={sendPending}
+                  className="flex-1 h-[36px] rounded-[10px] bg-[#176B4F] text-white font-sans text-[13.5px] font-medium flex items-center justify-center gap-1.5 cursor-pointer hover:bg-[#14694F] active:scale-[0.99] transition-all duration-150 outline-none"
+                >
+                  Send
+                  <span className="text-[14px]">→</span>
+                </button>
+                <button
+                  onClick={discardPending}
+                  className="h-[36px] px-3 rounded-[10px] border border-[#DADDD7] text-[#59635D] font-sans text-[12.5px] cursor-pointer hover:bg-[#F3F2ED] transition-colors duration-150 outline-none"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="font-sans font-normal text-[14.5px] text-[#1B211E] leading-[1.5] mt-[14px] pr-2">
+            “{displayQuery}”
+          </p>
+        )}
 
         {/* First Divider */}
         <hr className="border-0 border-t border-[#E6E6E1] mt-[18px]" />
