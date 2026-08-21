@@ -738,6 +738,21 @@ async def _run_rag_pipeline_streaming_impl(
                         tokens = result.completion_tokens or len(answer.split())
                         ttft = result.ttft_ms
                 st.detail = f"{llm.provider} {tokens} tok streamed"
+                if not answer:
+                    # The stream completed with no exception and zero
+                    # content -- some providers do this instead of raising
+                    # (observed live on groq/compound-mini). The REST
+                    # pipeline never hits this gap because check_answer()
+                    # refuses on an empty string unconditionally; here the
+                    # `and answer` guard below would otherwise skip that
+                    # check entirely and this would ship as a silent
+                    # "success" with a blank answer. Treat it the same as a
+                    # mid-stream failure rather than let it through.
+                    logger.warning(f"stream completed with 0 tokens for {query!r}")
+                    degraded = True
+                    st.detail = "FAILED: empty stream (0 tokens)"
+                    answer = "उत्तर निर्माण अभी विफल रहा। नीचे प्राप्त संदर्भ उपलब्ध है।"
+                    yield {"type": "token", "delta": answer}
             except Exception as e:
                 logger.error(f"stream failed after {len(answer)} chars: {e}")
                 degraded = True

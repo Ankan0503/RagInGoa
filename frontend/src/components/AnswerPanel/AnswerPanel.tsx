@@ -47,45 +47,36 @@ function SourceRow({ source }: { source: Source }) {
  */
 export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () => void }) {
   const {
-    query, answer, sources, metrics, groundingWarning,
+    query, answer, sources, metrics, groundingWarning, isProcessing,
     pendingTranscript, awaitingSend, isListening, sendPending, discardPending
   } = useRag();
 
-  const displaySources: Source[] = sources.length > 0
-    ? sources.slice(0, 3).map((s, idx) => ({
-        id: String(idx + 1).padStart(2, "0"),
-        passage: `Passage #${s.parent_id || (idx + 1)}`,
-        score: (s.score || 0.85).toFixed(2)
-      }))
-    : [
-        {
-          id: "01",
-          passage: "Passage #18291",
-          score: "0.92"
-        },
-        {
-          id: "02",
-          passage: "Passage #48302",
-          score: "0.87"
-        },
-        {
-          id: "03",
-          passage: "Passage #91220",
-          score: "0.83"
-        }
-      ];
+  // No placeholder content anywhere below: a fresh page, or a query with no
+  // sources/answer yet, shows an honest empty/loading state rather than
+  // invented numbers or passages. Real measurements only ever come from an
+  // actual response -- previously this component defaulted to a fabricated
+  // "renewable energy" answer, three fake passage IDs, "87ms", and "96%"
+  // whenever the real values were empty, which is exactly backwards: it
+  // looked like a working demo even when nothing had actually run yet, and
+  // silently kept showing fake data if a real request came back empty.
+  const hasAnswered = sources.length > 0 || Boolean(answer) || Boolean(query);
 
-  const displayQuery = query || "What factors affect the efficiency of renewable energy systems?";
-  const displayAnswer = answer || "The efficiency of renewable energy systems depends on several factors such as resource availability, system design, location, weather conditions, storage capability, and maintenance practices.";
-  const retrievalTime = metrics?.retrieval_latency_ms ? `${Math.round(metrics.retrieval_latency_ms)}ms` : "87ms";
-  // When the gate actually reports an overlap score, show that real number
-  // rather than the ttft-derived placeholder.
-  const groundedPercentage = groundingWarning?.score != null
-    ? `${(groundingWarning.score * 100).toFixed(0)}%`
-    : metrics?.ttft_ms
-      ? `${Math.min(99, Math.max(80, Math.round(100 - (metrics.ttft_ms / 50))))}%`
-      : "96%";
-  const passagesCount = sources.length > 0 ? sources.length : 5;
+  const displaySources: Source[] = sources.slice(0, 3).map((s, idx) => ({
+    id: String(idx + 1).padStart(2, "0"),
+    passage: `Passage #${s.parent_id || idx + 1}`,
+    score: typeof s.score === "number" ? s.score.toFixed(2) : "—",
+  }));
+
+  const displayQuery = query || null;
+  const displayAnswer = answer || null;
+
+  const retrievalTime = metrics?.retrieval_latency_ms != null
+    ? `${Math.round(metrics.retrieval_latency_ms)}ms` : "—";
+  // Only ever the real grounding score from the guardrail, never a value
+  // derived from latency or anything else standing in for it.
+  const groundedPercentage = metrics?.grounding_score != null
+    ? `${(metrics.grounding_score * 100).toFixed(0)}%` : "—";
+  const passagesCount = sources.length > 0 ? String(sources.length) : "—";
 
   return (
     <div
@@ -155,9 +146,13 @@ export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () =>
               </div>
             )}
           </div>
-        ) : (
+        ) : displayQuery ? (
           <p className="font-sans font-normal text-[14.5px] text-[#1B211E] leading-[1.5] mt-[14px] pr-2">
             “{displayQuery}”
+          </p>
+        ) : (
+          <p className="font-sans font-normal text-[14.5px] text-[#9AA39D] italic leading-[1.5] mt-[14px] pr-2">
+            Ask a question to get started.
           </p>
         )}
 
@@ -176,11 +171,17 @@ export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () =>
             already read reads as a bug, while the banner below states plainly
             that the system caught it. */}
         <p
-          className={`font-sans font-normal text-[14.5px] leading-[1.5] mt-[12px] text-justify transition-opacity duration-300 ${
-            groundingWarning ? "text-[#6B716D] opacity-70" : "text-[#202522]"
+          className={`font-sans leading-[1.5] mt-[12px] text-justify transition-opacity duration-300 ${
+            displayAnswer
+              ? `font-normal text-[14.5px] ${groundingWarning ? "text-[#6B716D] opacity-70" : "text-[#202522]"}`
+              : "font-normal text-[14px] text-[#9AA39D] italic"
           }`}
         >
-          {displayAnswer}
+          {displayAnswer
+            ? displayAnswer
+            : isProcessing
+              ? "Generating an answer…"
+              : "No answer yet — ask a question to see one here."}
         </p>
 
         {groundingWarning && (
@@ -216,27 +217,25 @@ export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () =>
           </span>
         </div>
 
-        {/* Map Source Rows with light dividers in between */}
-        <div className="flex flex-col gap-1">
-          {displaySources.map((source, index) => (
-            <React.Fragment key={source.id}>
-              <SourceRow source={source} />
-              {index < displaySources.length - 1 && (
-                <hr className="border-0 border-t border-[#EEEEEA]" />
-              )}
-            </React.Fragment>
-          ))}
-        </div>
-
-        {/* Outlined "View all sources" button */}
-        <button className="w-full h-[36px] border border-[#E5E6E1] rounded-[10px] bg-transparent flex items-center justify-center gap-2 mt-[12px] cursor-pointer hover:bg-[#F5F8F3] hover:text-[#176B4F] hover:border-[#D7E1D9] transition-all duration-150 select-none outline-none group text-[#5F8A76]">
-          <span className="font-sans font-normal text-[13px]">
-            View all sources
-          </span>
-          <span className="font-sans font-normal text-[14px] transition-transform duration-150 group-hover:translate-x-1">
-            →
-          </span>
-        </button>
+        {/* Map Source Rows with light dividers in between, or an honest
+            empty state -- no fabricated passage IDs when nothing has been
+            retrieved yet. */}
+        {displaySources.length > 0 ? (
+          <div className="flex flex-col gap-1">
+            {displaySources.map((source, index) => (
+              <React.Fragment key={source.id}>
+                <SourceRow source={source} />
+                {index < displaySources.length - 1 && (
+                  <hr className="border-0 border-t border-[#EEEEEA]" />
+                )}
+              </React.Fragment>
+            ))}
+          </div>
+        ) : (
+          <p className="font-sans text-[13px] text-[#9AA39D] italic py-2">
+            No sources yet — ask a question first.
+          </p>
+        )}
 
         {/* Retrieval/Grounding statistics metrics card (74px height) */}
         <div className="w-full h-[74px] bg-[#EEF5ED] rounded-[12px] flex items-center justify-between px-3 mt-[16px]">

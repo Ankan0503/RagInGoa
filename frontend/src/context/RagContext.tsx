@@ -39,6 +39,11 @@ export interface LatencyMetrics {
   tokens_per_second?: number;
   total_tokens?: number;
   sla_passed?: boolean;
+  /** The real values from guardrails on this answer -- not derived from
+   *  latency or any other proxy. Only present once a "done" event with a
+   *  real grounding check has been received. */
+  grounding_score?: number | null;
+  retrieval_score?: number | null;
 }
 
 export type PipelineStage = 
@@ -216,9 +221,16 @@ export function RagProvider({ children }: { children: ReactNode }) {
       isStreamingRef.current = false;
       setIsProcessing(false);
       setStatusStage("done");
-      setAnswer(data.answer || "");
+      setAnswer(data.answer ?? "");
       setSources(data.sources || []);
-      if (data.metrics) setMetrics(data.metrics);
+      if (data.metrics) {
+        setMetrics((prev) => ({
+          ...prev,
+          ...data.metrics,
+          grounding_score: data.guardrails?.grounding_score ?? null,
+          retrieval_score: data.guardrails?.retrieval_score ?? null,
+        }));
+      }
     } else if (data.type === "retrieval") {
       setStatusStage("generating");
       setSources(data.sources || []);
@@ -238,11 +250,21 @@ export function RagProvider({ children }: { children: ReactNode }) {
       isStreamingRef.current = false;
       setIsProcessing(false);
       setStatusStage("done");
-      if (data.full_answer) {
-        setAnswer(data.full_answer);
-      }
+      // Always sync to the server's real value, including an empty one --
+      // `if (data.full_answer)` used to skip this on an empty string, which
+      // meant a failed/empty generation left whatever was on screen before
+      // (stale text from a prior question, or nothing) with no indication
+      // anything had gone wrong. The backend now turns a 0-token stream into
+      // a real Hindi failure message rather than an empty string, but the
+      // frontend should not silently swallow "" either way.
+      setAnswer(data.full_answer ?? "");
       if (data.metrics) {
-        setMetrics(data.metrics);
+        setMetrics((prev) => ({
+          ...prev,
+          ...data.metrics,
+          grounding_score: data.guardrails?.grounding_score ?? prev?.grounding_score ?? null,
+          retrieval_score: data.guardrails?.retrieval_score ?? prev?.retrieval_score ?? null,
+        }));
       }
     } else if (data.type === "error") {
       isStreamingRef.current = false;
