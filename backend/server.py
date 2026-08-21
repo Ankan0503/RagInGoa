@@ -728,6 +728,7 @@ async def _run_rag_pipeline_streaming_impl(
         # screen a silent retry would splice two different answers together.
         # A mid-stream failure degrades instead, keeping what was shown.
         with prof.stage("llm_generate") as st:
+            finish_reason = ""
             try:
                 async for delta, result in llm.stream(
                         messages, temperature=temperature, max_tokens=max_tokens):
@@ -737,20 +738,28 @@ async def _run_rag_pipeline_streaming_impl(
                     if result is not None:
                         tokens = result.completion_tokens or len(answer.split())
                         ttft = result.ttft_ms
+                        finish_reason = result.finish_reason
                 st.detail = f"{llm.provider} {tokens} tok streamed"
                 if not answer:
                     # The stream completed with no exception and zero
-                    # content -- some providers do this instead of raising
-                    # (observed live on groq/compound-mini). The REST
+                    # content -- some providers do this instead of raising.
+                    # Observed live on both groq/compound-mini (that time
+                    # traced to an account-level rate limit on an underlying
+                    # model it delegates to) and openai/gpt-oss-20b (cause
+                    # not yet identified -- finish_reason is now logged so
+                    # the next occurrence is diagnosable instead of a bare
+                    # "0 tokens" with no further information). The REST
                     # pipeline never hits this gap because check_answer()
                     # refuses on an empty string unconditionally; here the
                     # `and answer` guard below would otherwise skip that
                     # check entirely and this would ship as a silent
                     # "success" with a blank answer. Treat it the same as a
                     # mid-stream failure rather than let it through.
-                    logger.warning(f"stream completed with 0 tokens for {query!r}")
+                    logger.warning(
+                        f"stream completed with 0 tokens for {query!r} "
+                        f"(model={llm.model}, finish_reason={finish_reason!r})")
                     degraded = True
-                    st.detail = "FAILED: empty stream (0 tokens)"
+                    st.detail = f"FAILED: empty stream (0 tokens, finish_reason={finish_reason or 'none'})"
                     answer = "उत्तर निर्माण अभी विफल रहा। नीचे प्राप्त संदर्भ उपलब्ध है।"
                     yield {"type": "token", "delta": answer}
             except Exception as e:

@@ -162,6 +162,32 @@ function EntryRow({ entry }: { entry: QueryLogEntry }) {
                 Stage breakdown
               </span>
               {entry.stages.map((s, i) => <StageRow key={`${s.stage}-${i}`} stage={s} />)}
+
+              {/* Totals -- the same numbers already shown inline on the
+                  collapsed row (R / L / E2E), repeated here as an explicit
+                  sum under the sub-stages they add up from, since a reader
+                  expanding the breakdown wants the total right where the
+                  parts are, not just up in the header. */}
+              <div className="flex flex-col mt-1.5 pt-1.5 border-t border-[#E6EAE3]">
+                <div className="flex items-center justify-between py-1 px-3">
+                  <span className="font-sans text-[12.5px] font-medium text-[#3E453F]">Total retrieval</span>
+                  <span className="font-sans text-[12.5px] font-semibold text-[#176B4F] tabular-nums">
+                    {fmtMs(entry.retrieval_ms)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between py-1 px-3">
+                  <span className="font-sans text-[12.5px] font-medium text-[#3E453F]">LLM generation</span>
+                  <span className="font-sans text-[12.5px] font-semibold text-[#176B4F] tabular-nums">
+                    {fmtMs(entry.generation_ms)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between py-1 px-3">
+                  <span className="font-sans text-[12.5px] font-semibold text-[#151A17]">Total end-to-end</span>
+                  <span className="font-sans text-[13px] font-bold text-[#176B4F] tabular-nums">
+                    {fmtMs(entry.end_to_end_ms)}
+                  </span>
+                </div>
+              </div>
             </div>
           ) : (
             <p className="font-sans text-[12.5px] text-[#9AA39D] px-3">No stage data recorded.</p>
