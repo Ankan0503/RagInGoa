@@ -4,7 +4,7 @@
  */
 
 import React from "react";
-import { Timer, Target, ShieldCheck, AlertTriangle } from "lucide-react";
+import { Timer, Target, ShieldCheck, AlertTriangle, BarChart2 } from "lucide-react";
 import { useRag } from "../../context/RagContext";
 
 /**
@@ -45,7 +45,7 @@ function SourceRow({ source }: { source: Source }) {
 /**
  * Right panel answer & evidence visualization element.
  */
-export default function AnswerPanel() {
+export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () => void }) {
   const {
     query, answer, sources, metrics, groundingWarning,
     pendingTranscript, awaitingSend, isListening, sendPending, discardPending
@@ -287,6 +287,23 @@ export default function AnswerPanel() {
           </div>
 
         </div>
+
+        {/* Links to the full latency/query log in the sidebar's Insights
+            section -- the same numbers above (retrieval/grounded/passages),
+            but every query this deployment has ever answered, with the
+            per-stage breakdown expandable per row. */}
+        <button
+          onClick={onOpenInsights}
+          className="w-full h-[38px] rounded-[10px] bg-[#EEF5ED] border border-[#D7E1D9] flex items-center justify-center gap-2 mt-[10px] cursor-pointer hover:bg-[#E4EFE1] transition-colors duration-150 select-none outline-none group"
+        >
+          <BarChart2 className="w-[14px] h-[14px] stroke-[1.8] text-[#176B4F]" />
+          <span className="font-sans font-medium text-[13px] text-[#176B4F]">
+            Check Insights
+          </span>
+          <span className="font-sans text-[13px] text-[#176B4F] transition-transform duration-150 group-hover:translate-x-1">
+            →
+          </span>
+        </button>
       </div>
     </div>
   );

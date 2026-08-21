@@ -1,5 +1,20 @@
 import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from "react";
 
+/** Resolve the REST API base URL from .env or window.location. Standalone
+ *  (not a closure over component state) so pages outside the voice flow --
+ *  Insights, for one -- can hit the same backend without duplicating this
+ *  dev-port/prod-port resolution logic. */
+export function resolveApiBaseUrl(): string {
+  const envUrl = (import.meta as any).env?.VITE_API_BASE_URL;
+  if (envUrl) return envUrl;
+  const protocol = (typeof window !== "undefined" && window.location.protocol) || "http:";
+  const host = (typeof window !== "undefined" && window.location.hostname) || "localhost";
+  const port = (typeof window !== "undefined" && window.location.port) || "";
+  const isDevPort = ["3000", "3001", "5173", "4173"].includes(port);
+  const targetPort = isDevPort ? ":8000" : (port ? `:${port}` : "");
+  return `${protocol}//${host}${targetPort}`;
+}
+
 export interface SourceHit {
   score: number;
   strategy: string;
@@ -115,16 +130,7 @@ export function RagProvider({ children }: { children: ReactNode }) {
     return `${protocol}//${host}${targetPort}/ws/voice-rag`;
   };
 
-  const getApiBaseUrl = (): string => {
-    const envUrl = (import.meta as any).env?.VITE_API_BASE_URL;
-    if (envUrl) return envUrl;
-    const protocol = (typeof window !== "undefined" && window.location.protocol) || "http:";
-    const host = (typeof window !== "undefined" && window.location.hostname) || "localhost";
-    const port = (typeof window !== "undefined" && window.location.port) || "";
-    const isDevPort = ["3000", "3001", "5173", "4173"].includes(port);
-    const targetPort = isDevPort ? ":8000" : (port ? `:${port}` : "");
-    return `${protocol}//${host}${targetPort}`;
-  };
+  const getApiBaseUrl = resolveApiBaseUrl;
 
   // Initialize and Maintain WebSocket Connection
   useEffect(() => {

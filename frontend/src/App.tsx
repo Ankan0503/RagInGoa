@@ -9,6 +9,7 @@ import LeftSidebar from "./components/LeftSidebar/LeftSidebar";
 import AskHero from "./components/AskHero/AskHero";
 import AnswerPanel from "./components/AnswerPanel/AnswerPanel";
 import AboutSection from "./components/AboutSection/AboutSection";
+import InsightsSection from "./components/InsightsSection/InsightsSection";
 import { RagProvider } from "./context/RagContext";
 
 export default function App() {
@@ -17,8 +18,7 @@ export default function App() {
   // ignores it at lg+ via its own md:/lg: classes.
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  // Which section the main column shows. "insights" has no dedicated view
-  // yet, so it falls through to the Ask layout below rather than a blank page.
+  // Which section the main column shows.
   const [activeSection, setActiveSection] = useState("ask");
 
   return (
@@ -78,13 +78,15 @@ export default function App() {
           >
             {activeSection === "about" ? (
               <AboutSection />
+            ) : activeSection === "insights" ? (
+              <InsightsSection />
             ) : (
               <>
                 {/* Main interactive content area - AskHero */}
                 <AskHero />
 
                 {/* Right Answer/Results Panel */}
-                <AnswerPanel />
+                <AnswerPanel onOpenInsights={() => setActiveSection("insights")} />
               </>
             )}
           </div>
