@@ -10,8 +10,8 @@
 
 | Member | Socials & Links |
 | :--- | :--- |
-| **Ankan Giri** | [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat&logo=github&logoColor=white)](https://github.com/Ankan0503) [![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=flat&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/ankan-giri-71a34935a) [![X](https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white)](https://x.com/Ankan0305) [![Instagram](https://img.shields.io/badge/Instagram-E4405F?style=flat&logo=instagram&logoColor=white)](https://www.instagram.com/_xquisite_xplorer/) |
-| **Sayan Sinha** | [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat&logo=github&logoColor=white)](https://github.com/Sayan260106) [![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=flat&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/sayan-sinha-300a20363) [![X](https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white)](https://x.com/Sayan260106) [![Instagram](https://img.shields.io/badge/Instagram-E4405F?style=flat&logo=instagram&logoColor=white)](https://www.instagram.com/_sayansinha_26/) |
+| **Ankan Giri** | [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat&logo=github&logoColor=white)](https://github.com/Ankan0503) [![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=flat&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/ankan-giri-71a34935a) [![X](https://img.shields.io/badge/X_(Twitter)-000000?style=flat&logo=x&logoColor=white)](https://x.com/Ankan0305) [![Instagram](https://img.shields.io/badge/Instagram-E4405F?style=flat&logo=instagram&logoColor=white)](https://www.instagram.com/_xquisite_xplorer/) |
+| **Sayan Sinha** | [![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat&logo=github&logoColor=white)](https://github.com/Sayan260106) [![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=flat&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/sayan-sinha-300a20363) [![X](https://img.shields.io/badge/X_(Twitter)-000000?style=flat&logo=x&logoColor=white)](https://x.com/Sayan260106) [![Instagram](https://img.shields.io/badge/Instagram-E4405F?style=flat&logo=instagram&logoColor=white)](https://www.instagram.com/_sayansinha_26/) |
 
 ---
 
@@ -234,25 +234,40 @@ index (20K-query subset, before the full 97,941-query rebuild):
 | **Retrieval P100** | 26,744 ms | **161 ms** | 166× |
 | **Startup time** | ~75 min | **< 40 s** | — |
 
-### Generation latency by model
+### Full pipeline, by model — full 97,941-query index (3.43M vectors)
 
-Measured via `backend/benchmark.py` against the live pipeline (retrieval +
-guardrails + generation), comparing candidate `GROQ_MODEL` values:
+Measured via `backend/benchmark.py --compare-models` against the live pipeline
+(retrieval + both guardrails + generation) on the deployed, full-scale index —
+not the 680K-vector subset above. Two storage fixes were applied to the live
+Qdrant collection before this run: the HNSW graph and the BM25 sparse index
+were both switched from Qdrant's default memory-mapped (disk) storage to
+RAM-resident. At 680K vectors this distinction didn't matter — the graph fit
+in the OS page cache regardless. At 3.43M vectors it did: retrieval P50 sat
+at 120–130ms with the graph on disk, every model, regardless of which one
+answered — confirming the cost was architectural, not model-dependent, before
+the fix below.
 
-| Model | Mean generation | P100 generation | Notes |
-| :--- | :--- | :--- | :--- |
-| `gpt-oss-20b` | 551.85 ms | 1,809 ms | Grounding-gate refusal rate on this data was high on this model — unresolved, needs its own investigation before trusting these numbers as final |
-| `qwen3.6-27b` | 623.81 ms | 1,169 ms | Same open grounding-refusal question as above |
-| `groq/compound-mini` | 723.56 ms | 1,529 ms | Slowest measured, and observed generating past its `MAX_TOKENS` limit on at least one live request |
+| Model | Retrieval P50/P100 | Generation P50/P100 | End-to-end P50/P100 | Refused | Recall |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `qwen/qwen3-32b` | 132.6 / 4,235 ms¹ | 562.5 / 1,220 ms | 689.7 / 5,650 ms¹ | 2/30 (retrieval gate only) | 0.280 |
+| `openai/gpt-oss-20b` | 94.0 / 166.0 ms | 569.0 / 825.7 ms | 667.0 / 910.1 ms | 10/30 (9 grounding, 1 retrieval) | 0.276 |
+| `groq/compound-mini` | 90.8 / 170.3 ms | 574.3 / 1,615 ms | 665.3 / 1,712 ms | 2/30 (retrieval gate only) | 0.348 |
 
-### Not yet benchmarked
+¹ qwen's P100 here is a single one-time outlier on the first query of this
+run — the first search to touch a just-migrated HNSW segment paid a real
+page-fault cost once. Every query after it in this same run, and every query
+in the two model runs that followed, ran clean; qwen's P70/P90 for this run
+were 169ms/195ms, in line with the other two models. Not reproducible on
+a re-run against a settled index.
 
-Streaming (token-by-token generation, realtime STT) shipped after the numbers
-above were measured, and the index has since grown 5× (97,941 queries, 3.43M
-vectors, up from the 680K-vector index above). Time-to-first-token, realtime
-STT latency, and full-corpus retrieval latency have not been formally
-re-measured against the current stack — re-run `backend/benchmark.py` before
-citing end-to-end numbers anywhere that matters.
+`gpt-oss-20b`'s grounding-gate refusal rate (9/30, ~30%) is real and
+reproduces across multiple independent runs on this data — the model
+generates an answer, then the post-generation lexical-overlap check rejects
+it. Whether this is a genuine grounding failure or a format mismatch with
+the overlap check has not been investigated (see Guardrails above).
+`compound-mini` and `qwen/qwen3-32b` show 0% grounding-gate refusals across
+every run measured this session; both refusals shown for each are the
+retrieval gate declining to answer before generation runs at all.
 
 ---
 
