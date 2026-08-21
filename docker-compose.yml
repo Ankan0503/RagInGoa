@@ -165,6 +165,12 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
 
+      # Every question asked and answer given, with the full latency
+      # breakdown -- backs the public Insights page. Deliberately writable
+      # and on its own named volume, separate from the :ro index files below:
+      # this file is created and grown by the running app, not shipped data.
+      QUERY_LOG_PATH: ${QUERY_LOG_PATH:-/app/backend/query_log/query_log.sqlite}
+
     volumes:
       # parents.sqlite (281MB) and index_manifest.json are gitignored, so they are
       # NOT in a git clone — they ship alongside the Qdrant snapshot and are placed
@@ -183,6 +189,7 @@ services:
       # the docs do not state it and it must not be guessed.
       - ${INDEX_DIR:-./backend}/parents.sqlite:/app/backend/parents.sqlite:ro
       - ${INDEX_DIR:-./backend}/index_manifest.json:/app/backend/index_manifest.json:ro
+      - query_log_data:/app/backend/query_log
 
     healthcheck:
       # /health returns 503 when the index is unusable, so an unhealthy container
@@ -205,3 +212,4 @@ services:
 volumes:
   qdrant_storage:
   qdrant_snapshots:
+  query_log_data:

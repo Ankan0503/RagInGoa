@@ -41,6 +41,7 @@ from stt_realtime import SarvamRealtimeSTT, STTRealtimeError
 from guardrails import GuardrailPipeline, Verdict, RefusalReason
 from profiling import Profiler, DEFAULT_BUDGET_MS
 from llm import build_llm, BaseLLM, LLMError, available_providers
+from query_log import QueryLog, QueryLogEntry
 
 logging.basicConfig(
     level=logging.INFO,
@@ -211,6 +212,7 @@ class AppState:
     llm: Optional[BaseLLM] = None
     llm_pool: Dict[str, BaseLLM] = {}
     guards: Optional[GuardrailPipeline] = None
+    query_log: Optional[QueryLog] = None
     index_error: Optional[str] = None
 
     def get_llm(self, provider: Optional[str], model: Optional[str] = None) -> Optional[BaseLLM]:
@@ -254,6 +256,8 @@ async def lifespan(app: FastAPI):
         max_query_chars=Limits.MAX_QUERY_CHARS,
     )
     logger.info("Guardrails armed")
+
+    state.query_log = QueryLog()
 
     sarvam_key = os.getenv("SARVAM_API_KEY")
     if sarvam_key:
@@ -399,7 +403,87 @@ def require_admin(x_admin_token: str = Header(default="")):
     return True
 
 
+async def _log_query(
+    query: str,
+    answer: str,
+    refused: bool,
+    stages: List[Dict[str, Any]],
+    transcript: Optional[str] = None,
+    refusal_reason: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    retrieval_ms: Optional[float] = None,
+    generation_ms: Optional[float] = None,
+    guardrail_ms: Optional[float] = None,
+    end_to_end_ms: Optional[float] = None,
+    grounding_score: Optional[float] = None,
+) -> None:
+    """The one place every completed request -- voice or text, streamed or
+    not, refused or answered -- gets printed and persisted. Printed every
+    time so retrieval/llm/end-to-end are visible in the server log without
+    opening the Insights page; persisted so the Insights page has something
+    to show after the log has scrolled past, and survives a restart.
+    """
+    logger.info(
+        f"[QUERY] retrieval={retrieval_ms or 0:.1f}ms llm={generation_ms or 0:.1f}ms "
+        f"end_to_end={end_to_end_ms or 0:.1f}ms refused={refused} "
+        f"{query!r} -> {answer[:120]!r}"
+    )
+    if state.query_log is None:
+        return
+    entry = QueryLogEntry(
+        query=query, answer=answer, refused=refused, stages=stages,
+        transcript=transcript, refusal_reason=refusal_reason,
+        provider=provider, model=model,
+        retrieval_ms=retrieval_ms, generation_ms=generation_ms,
+        guardrail_ms=guardrail_ms, end_to_end_ms=end_to_end_ms,
+        grounding_score=grounding_score,
+    )
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            None, state.query_log.record, entry)
+    except Exception as e:
+        # A logging failure must never break a request that otherwise succeeded.
+        logger.error(f"query_log write failed: {e}")
+
+
 async def run_rag_pipeline(
+    query: str,
+    top_k: int = 3,
+    strategy: Optional[str] = None,
+    query_type: Optional[str] = None,
+    temperature: float = 0.0,
+    max_tokens: int = Limits.MAX_TOKENS,
+    stt_ms: Optional[float] = None,
+    transcript: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> QueryResponse:
+    """Thin wrapper around _run_rag_pipeline_impl that logs the result to
+    query_log.py regardless of which of the impl's several return points
+    fired -- refused at any gate, degraded, or a clean answer. Wrapping here
+    instead of instrumenting each return point means a future return path
+    added inside the impl can't accidentally skip logging."""
+    resp = await _run_rag_pipeline_impl(
+        query=query, top_k=top_k, strategy=strategy, query_type=query_type,
+        temperature=temperature, max_tokens=max_tokens, stt_ms=stt_ms,
+        transcript=transcript, provider=provider, model=model,
+    )
+    await _log_query(
+        query=resp.query, answer=resp.answer, refused=resp.refused,
+        stages=[s.model_dump() for s in resp.metrics.stages],
+        transcript=resp.transcript, refusal_reason=resp.guardrails.reason,
+        provider=resp.metrics.llm_provider, model=resp.metrics.llm_model,
+        retrieval_ms=resp.metrics.retrieval_ms,
+        generation_ms=resp.metrics.generation_ms,
+        guardrail_ms=resp.metrics.guardrail_ms,
+        end_to_end_ms=resp.metrics.wall_ms,
+        grounding_score=resp.guardrails.grounding_score,
+    )
+    return resp
+
+
+async def _run_rag_pipeline_impl(
     query: str,
     top_k: int = 3,
     strategy: Optional[str] = None,
@@ -495,8 +579,6 @@ async def run_rag_pipeline(
     if m.generation_ms > 0:
         m.tokens_per_second = round(tokens / (m.generation_ms / 1000.0), 2)
 
-    logger.info(f"[RAG] {query!r} -> {answer!r}")
-
     return QueryResponse(
         query=query,
         transcript=transcript,
@@ -513,6 +595,45 @@ async def run_rag_pipeline(
 
 
 async def run_rag_pipeline_streaming(
+    query: str,
+    top_k: int = 3,
+    strategy: Optional[str] = None,
+    query_type: Optional[str] = None,
+    temperature: float = 0.0,
+    max_tokens: int = Limits.MAX_TOKENS,
+    stt_ms: Optional[float] = None,
+    transcript: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> AsyncIterator[Dict[str, Any]]:
+    """Wraps _run_rag_pipeline_streaming_impl to log the terminal event
+    ("done" or "refused") the same way the REST wrapper above logs its
+    return value, then re-yields every event unchanged. Every other event
+    type (token, retrieval, grounding_failed, error) passes through untouched."""
+    async for event in _run_rag_pipeline_streaming_impl(
+        query=query, top_k=top_k, strategy=strategy, query_type=query_type,
+        temperature=temperature, max_tokens=max_tokens, stt_ms=stt_ms,
+        transcript=transcript, provider=provider, model=model,
+    ):
+        if event["type"] in ("done", "refused"):
+            metrics = event.get("metrics") or {}
+            guardrails = event.get("guardrails") or {}
+            await _log_query(
+                query=query, answer=event.get("full_answer") or event.get("answer") or "",
+                refused=event["type"] == "refused",
+                stages=metrics.get("stages") or [],
+                transcript=transcript, refusal_reason=guardrails.get("reason"),
+                provider=metrics.get("llm_provider"), model=metrics.get("llm_model"),
+                retrieval_ms=metrics.get("retrieval_ms"),
+                generation_ms=metrics.get("generation_ms"),
+                guardrail_ms=metrics.get("guardrail_ms"),
+                end_to_end_ms=metrics.get("wall_ms"),
+                grounding_score=guardrails.get("grounding_score"),
+            )
+        yield event
+
+
+async def _run_rag_pipeline_streaming_impl(
     query: str,
     top_k: int = 3,
     strategy: Optional[str] = None,
@@ -679,6 +800,22 @@ async def process_text_query(req: TextQueryRequest):
         query_type=req.query_type, temperature=req.temperature,
         max_tokens=req.max_tokens, provider=req.provider, model=req.model,
     )
+
+
+@app.get("/api/insights")
+async def get_insights(limit: int = 100):
+    """Every question asked and answer given on this deployment, with the
+    full per-stage latency breakdown for each. Backs the site's Insights
+    page -- deliberately public, not admin-gated, so it can be viewed
+    directly on the site rather than requiring a token."""
+    if state.query_log is None:
+        return {"entries": [], "stats": {"total_queries": 0, "total_refused": 0,
+                "avg_retrieval_ms": None, "avg_generation_ms": None,
+                "avg_end_to_end_ms": None}}
+    loop = asyncio.get_running_loop()
+    entries = await loop.run_in_executor(None, state.query_log.recent, limit)
+    stats = await loop.run_in_executor(None, state.query_log.stats)
+    return {"entries": entries, "stats": stats}
 
 
 class _LiveSTTSession:

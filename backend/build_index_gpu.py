@@ -533,7 +533,15 @@ class IndexBuilder:
                 size=self.cfg.embed_dim, distance=models.Distance.COSINE, on_disk=True)},
             sparse_vectors_config=sparse_cfg,
             quantization_config=quant,
-            hnsw_config=models.HnswConfigDiff(m=16, ef_construct=100, on_disk=True),
+            # on_disk=False: keep the HNSW graph resident in RAM rather than
+            # memory-mapped from disk. At the original 680K-vector build this
+            # didn't matter -- the graph fit in the OS page cache regardless.
+            # At 3.43M vectors it did: retrieval P50 sat at ~120-130ms instead
+            # of the ~44-80ms baseline until the graph was moved into RAM on
+            # the live collection (see the deploy notes / README benchmarks).
+            # Fixed here so a future rebuild doesn't reintroduce the same
+            # regression and require re-discovering and re-patching it live.
+            hnsw_config=models.HnswConfigDiff(m=16, ef_construct=100, on_disk=False),
         )
 
         for f in ("strategy", "parent_id", "query_type"):
