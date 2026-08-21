@@ -408,6 +408,14 @@ export function RagProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    // Temporary timing instrumentation to localize a reported 5-6s delay
+    // before the mic UI shows as active, with no permission popup involved
+    // (so the stall is somewhere in this function, not a browser dialog).
+    // Remove once the slow step is identified.
+    const t0 = performance.now();
+    const mark = (label: string) =>
+      console.log(`[mic-timing] ${label}: +${(performance.now() - t0).toFixed(0)}ms`);
+
     try {
       setError(null);
       setGroundingWarning(null);
@@ -422,15 +430,19 @@ export function RagProvider({ children }: { children: ReactNode }) {
       // of strictly after them. The server buffers any audio that arrives
       // before its side is ready, so this is safe even if getUserMedia
       // resolves first.
+      mark("start");
       ws.send(JSON.stringify({ type: "stt_start" }));
+      mark("ws.send done");
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mark("getUserMedia resolved");
       mediaStreamRef.current = stream;
 
       const AudioCtx =
         (window as any).AudioContext || (window as any).webkitAudioContext;
       const ctx: AudioContext = new AudioCtx();
       audioCtxRef.current = ctx;
+      mark("AudioContext created");
 
       const source = ctx.createMediaStreamSource(stream);
       // ScriptProcessor is deprecated in favour of AudioWorklet, but the
@@ -456,6 +468,7 @@ export function RagProvider({ children }: { children: ReactNode }) {
       // server's last "status" message set it to ("connecting" until the
       // Sarvam handshake completes, then "listening") -- overriding it here
       // would show "listening" before the server can actually hear anything.
+      mark("audio graph wired, setIsListening(true) now");
       setIsListening(true);
     } catch (err: any) {
       console.error("Microphone error:", err);

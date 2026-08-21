@@ -170,8 +170,21 @@ class GroqLLM(BaseLLM):
                 "Content-Type": "application/json"}
 
     def payload(self, messages, temperature, max_tokens, stream) -> Dict[str, Any]:
-        return {"model": self.model, "messages": messages,
-                "temperature": temperature, "max_tokens": max_tokens, "stream": stream}
+        body: Dict[str, Any] = {
+            "model": self.model, "messages": messages,
+            "temperature": temperature, "max_tokens": max_tokens, "stream": stream,
+        }
+        # gpt-oss models on Groq are reasoning models: hidden reasoning
+        # tokens are drawn from the same max_tokens budget as the visible
+        # answer. Left unset, Groq's default reasoning effort can consume
+        # the entire (deliberately small, latency-budgeted) max_tokens
+        # before any content is emitted, yielding finish_reason="length"
+        # with zero content -- observed live on openai/gpt-oss-20b. "low"
+        # keeps reasoning minimal so the small token budget goes to the
+        # actual answer. Other Groq models ignore the unknown field.
+        if "gpt-oss" in self.model:
+            body["reasoning_effort"] = "low"
+        return body
 
 
 class SarvamLLM(BaseLLM):
