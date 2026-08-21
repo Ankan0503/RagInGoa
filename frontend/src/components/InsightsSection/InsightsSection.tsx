@@ -4,8 +4,8 @@
  */
 
 import React, { useEffect, useState, useCallback } from "react";
-import { ChevronDown, RefreshCw, AlertCircle } from "lucide-react";
-import { resolveApiBaseUrl } from "../../context/RagContext";
+import { ChevronDown, RefreshCw, AlertCircle, Lock, Unlock, Trash2 } from "lucide-react";
+import { resolveApiBaseUrl, readLocalLog, clearLocalLog, LocalLogEntry } from "../../context/RagContext";
 
 interface StageTiming {
   stage: string;
@@ -15,13 +15,13 @@ interface StageTiming {
 }
 
 interface QueryLogEntry {
-  id: number;
+  id: string | number;
   ts: string;
   query: string;
   transcript: string | null;
   answer: string;
   refused: boolean;
-  refusal_reason: string | null;
+  refusal_reason?: string | null;
   provider: string | null;
   model: string | null;
   retrieval_ms: number | null;
@@ -32,17 +32,21 @@ interface QueryLogEntry {
   stages: StageTiming[];
 }
 
-interface InsightsResponse {
-  entries: QueryLogEntry[];
-  stats: {
-    total_queries: number;
-    total_refused: number;
-    avg_retrieval_ms: number | null;
-    avg_generation_ms: number | null;
-    avg_end_to_end_ms: number | null;
-  };
+interface SharedStats {
+  total_queries: number;
+  total_refused: number;
+  avg_retrieval_ms: number | null;
+  avg_generation_ms: number | null;
+  avg_end_to_end_ms: number | null;
 }
 
+interface InsightsResponse {
+  entries: QueryLogEntry[];
+  stats: SharedStats;
+  admin: boolean;
+}
+
+const ADMIN_TOKEN_KEY = "rag_admin_token";
 const RETRIEVAL_STAGE_NAMES = new Set([
   "query_normalize", "embed_query", "search_dense",
   "bm25_encode", "search_sparse", "fusion_rrf", "parent_fetch",
@@ -55,8 +59,7 @@ function fmtMs(v: number | null | undefined): string {
 
 function fmtTime(iso: string): string {
   try {
-    const d = new Date(iso);
-    return d.toLocaleString(undefined, {
+    return new Date(iso).toLocaleString(undefined, {
       month: "short", day: "numeric",
       hour: "2-digit", minute: "2-digit", second: "2-digit",
     });
@@ -67,11 +70,11 @@ function fmtTime(iso: string): string {
 
 function StatTile({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex-1 min-w-[120px] rounded-[12px] bg-[#F7F9F6] border border-[#E6EAE3] px-4 py-3 flex flex-col gap-0.5">
-      <span className="font-sans text-[19px] font-semibold text-[#176B4F] leading-none">
+    <div className="flex-1 min-w-[110px] rounded-[12px] bg-[#F7F9F6] border border-[#E6EAE3] px-3.5 py-2.5 flex flex-col gap-0.5">
+      <span className="font-sans text-[17px] font-semibold text-[#176B4F] leading-none">
         {value}
       </span>
-      <span className="font-sans text-[11px] text-[#727873] uppercase tracking-wide mt-1">
+      <span className="font-sans text-[10.5px] text-[#727873] uppercase tracking-wide mt-1">
         {label}
       </span>
     </div>
@@ -163,11 +166,6 @@ function EntryRow({ entry }: { entry: QueryLogEntry }) {
               </span>
               {entry.stages.map((s, i) => <StageRow key={`${s.stage}-${i}`} stage={s} />)}
 
-              {/* Totals -- the same numbers already shown inline on the
-                  collapsed row (R / L / E2E), repeated here as an explicit
-                  sum under the sub-stages they add up from, since a reader
-                  expanding the breakdown wants the total right where the
-                  parts are, not just up in the header. */}
               <div className="flex flex-col mt-1.5 pt-1.5 border-t border-[#E6EAE3]">
                 <div className="flex items-center justify-between py-1 px-3">
                   <span className="font-sans text-[12.5px] font-medium text-[#3E453F]">Total retrieval</span>
@@ -203,63 +201,126 @@ function EntryRow({ entry }: { entry: QueryLogEntry }) {
   );
 }
 
-export default function InsightsSection() {
-  const [data, setData] = useState<InsightsResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+function localToEntry(l: LocalLogEntry): QueryLogEntry {
+  return {
+    id: l.id, ts: l.ts, query: l.query, transcript: l.transcript,
+    answer: l.answer, refused: l.refused, provider: l.provider, model: l.model,
+    retrieval_ms: l.retrieval_ms, generation_ms: l.generation_ms,
+    guardrail_ms: l.guardrail_ms, end_to_end_ms: l.end_to_end_ms,
+    grounding_score: l.grounding_score, stages: l.stages,
+  };
+}
 
-  const load = useCallback(async () => {
-    setError(null);
+export default function InsightsSection() {
+  // "My history": this browser's own questions, from localStorage. No token,
+  // no server round-trip, visible to nobody else -- see RagContext.tsx for
+  // why this is a separate store from the shared server-side log below.
+  const [localEntries, setLocalEntries] = useState<QueryLogEntry[]>([]);
+
+  const loadLocal = useCallback(() => {
+    setLocalEntries(readLocalLog().map(localToEntry));
+  }, []);
+
+  useEffect(() => { loadLocal(); }, [loadLocal]);
+
+  const handleClearLocal = () => {
+    if (!window.confirm("Clear your local question history? This only affects this browser and cannot be undone.")) return;
+    clearLocalLog();
+    loadLocal();
+  };
+
+  // "Shared deployment log": every visitor's real queries, server-side.
+  // Aggregate `stats` is public; the actual `entries` only come back once a
+  // valid admin token is supplied, per the backend's /api/insights contract.
+  const [adminToken, setAdminTokenState] = useState<string>(
+    () => { try { return localStorage.getItem(ADMIN_TOKEN_KEY) || ""; } catch { return ""; } }
+  );
+  const [tokenInput, setTokenInput] = useState("");
+  const [shared, setShared] = useState<InsightsResponse | null>(null);
+  const [sharedError, setSharedError] = useState<string | null>(null);
+  const [loadingShared, setLoadingShared] = useState(true);
+  const [clearing, setClearing] = useState(false);
+
+  const setAdminToken = (token: string) => {
+    setAdminTokenState(token);
     try {
-      const res = await fetch(`${resolveApiBaseUrl()}/api/insights?limit=200`);
+      if (token) localStorage.setItem(ADMIN_TOKEN_KEY, token);
+      else localStorage.removeItem(ADMIN_TOKEN_KEY);
+    } catch { /* ignore */ }
+  };
+
+  const loadShared = useCallback(async (token: string) => {
+    setSharedError(null);
+    setLoadingShared(true);
+    try {
+      const res = await fetch(`${resolveApiBaseUrl()}/api/insights?limit=200`, {
+        headers: token ? { "X-Admin-Token": token } : {},
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json: InsightsResponse = await res.json();
-      setData(json);
+      setShared(json);
     } catch (e: any) {
-      setError(e?.message || "Could not load insights.");
+      setSharedError(e?.message || "Could not load the shared log.");
     } finally {
-      setLoading(false);
+      setLoadingShared(false);
     }
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { loadShared(adminToken); }, [loadShared, adminToken]);
 
-  const stats = data?.stats;
-  const entries = data?.entries || [];
+  const handleUnlock = () => {
+    if (!tokenInput.trim()) return;
+    setAdminToken(tokenInput.trim());
+    setTokenInput("");
+  };
+
+  const handleLock = () => {
+    setAdminToken("");
+  };
+
+  const handleClearShared = async () => {
+    if (!adminToken) return;
+    if (!window.confirm("Clear the ENTIRE shared query log for every visitor? This cannot be undone.")) return;
+    setClearing(true);
+    try {
+      const res = await fetch(`${resolveApiBaseUrl()}/api/insights`, {
+        method: "DELETE",
+        headers: { "X-Admin-Token": adminToken },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await loadShared(adminToken);
+    } catch (e: any) {
+      setSharedError(e?.message || "Could not clear the shared log.");
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const isAdmin = Boolean(shared?.admin);
+  const stats = shared?.stats;
+  const sharedEntries = shared?.entries || [];
 
   return (
     <div
       id="insights-section"
       className="flex-1 w-full h-full overflow-y-auto flex flex-col items-center px-6 py-8"
     >
-      <div className="w-full max-w-[820px] flex flex-col gap-6">
+      <div className="w-full max-w-[820px] flex flex-col gap-8">
 
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex flex-col gap-1">
-            <span className="font-sans text-[13px] font-semibold text-[#176B4F] tracking-[0.12em] uppercase">
-              Insights
-            </span>
-            <h1 className="font-serif text-[28px] sm:text-[34px] font-semibold text-[#151A17] leading-[1.05] tracking-tight">
-              Every question, every answer, every millisecond
-            </h1>
-            <p className="font-sans text-[14.5px] text-[#686D69] leading-relaxed mt-1 max-w-[560px]">
-              A live, local record of what this deployment has been asked and how it answered —
-              retrieval, generation and end-to-end latency for each request. Expand a row for the
-              full per-stage breakdown.
-            </p>
-          </div>
-          <button
-            onClick={load}
-            disabled={loading}
-            className="shrink-0 w-[36px] h-[36px] rounded-full flex items-center justify-center border border-[#DADDD7] text-[#59635D] hover:bg-[#F3F2ED] transition-colors duration-150 cursor-pointer outline-none disabled:opacity-50"
-            aria-label="Refresh"
-          >
-            <RefreshCw className={`w-[15px] h-[15px] ${loading ? "animate-spin" : ""}`} />
-          </button>
+        <div className="flex flex-col gap-1">
+          <span className="font-sans text-[13px] font-semibold text-[#176B4F] tracking-[0.12em] uppercase">
+            Insights
+          </span>
+          <h1 className="font-serif text-[28px] sm:text-[34px] font-semibold text-[#151A17] leading-[1.05] tracking-tight">
+            Every question, every answer, every millisecond
+          </h1>
+          <p className="font-sans text-[14.5px] text-[#686D69] leading-relaxed mt-1 max-w-[600px]">
+            Retrieval, generation and end-to-end latency for each request. Expand a row for the
+            full per-stage breakdown.
+          </p>
         </div>
 
+        {/* Public, aggregate performance -- no privacy risk, visible to anyone */}
         {stats && (
           <div className="flex flex-wrap gap-2.5">
             <StatTile label="Total queries" value={String(stats.total_queries)} />
@@ -270,21 +331,125 @@ export default function InsightsSection() {
           </div>
         )}
 
-        {error && (
-          <div className="flex items-center gap-2 rounded-[10px] border border-[#F0D9A8] bg-[#FDF7EA] px-3.5 py-2.5">
-            <AlertCircle className="w-[15px] h-[15px] text-[#B8801F] shrink-0" />
-            <span className="font-sans text-[13px] text-[#8A5F12]">{error}</span>
+        {/* ---- My history (local, this browser only) ---- */}
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <h2 className="font-sans font-semibold text-[16px] text-[#176B4F]">
+              My history
+              <span className="font-sans font-normal text-[13px] text-[#9AA39D] ml-2">
+                stored in this browser only, visible to nobody else
+              </span>
+            </h2>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={loadLocal}
+                className="w-[30px] h-[30px] rounded-full flex items-center justify-center border border-[#DADDD7] text-[#59635D] hover:bg-[#F3F2ED] transition-colors duration-150 cursor-pointer outline-none"
+                aria-label="Refresh my history"
+              >
+                <RefreshCw className="w-[13px] h-[13px]" />
+              </button>
+              {localEntries.length > 0 && (
+                <button
+                  onClick={handleClearLocal}
+                  className="h-[30px] px-3 rounded-[8px] flex items-center gap-1.5 border border-[#F0D0C8] text-[#B8480F] hover:bg-[#FCEEE6] transition-colors duration-150 cursor-pointer outline-none"
+                >
+                  <Trash2 className="w-[13px] h-[13px]" />
+                  <span className="font-sans text-[12.5px] font-medium">Clear my history</span>
+                </button>
+              )}
+            </div>
           </div>
-        )}
 
-        {!loading && !error && entries.length === 0 && (
-          <p className="font-sans text-[14px] text-[#9AA39D] text-center py-10">
-            No questions have been asked yet on this deployment.
-          </p>
-        )}
+          {localEntries.length === 0 ? (
+            <p className="font-sans text-[13.5px] text-[#9AA39D] italic py-2">
+              You haven't asked anything in this browser yet.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2.5">
+              {localEntries.map((e) => <EntryRow key={e.id} entry={e} />)}
+            </div>
+          )}
+        </div>
 
-        <div className="flex flex-col gap-2.5 pb-6">
-          {entries.map((e) => <EntryRow key={e.id} entry={e} />)}
+        {/* ---- Shared deployment log (server-side, admin-gated) ---- */}
+        <div className="flex flex-col gap-3 pb-6">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <h2 className="font-sans font-semibold text-[16px] text-[#176B4F]">
+              Shared deployment log
+              <span className="font-sans font-normal text-[13px] text-[#9AA39D] ml-2">
+                every visitor's real questions — organizer access only
+              </span>
+            </h2>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => loadShared(adminToken)}
+                disabled={loadingShared}
+                className="w-[30px] h-[30px] rounded-full flex items-center justify-center border border-[#DADDD7] text-[#59635D] hover:bg-[#F3F2ED] transition-colors duration-150 cursor-pointer outline-none disabled:opacity-50"
+                aria-label="Refresh shared log"
+              >
+                <RefreshCw className={`w-[13px] h-[13px] ${loadingShared ? "animate-spin" : ""}`} />
+              </button>
+              {isAdmin && (
+                <>
+                  <button
+                    onClick={handleClearShared}
+                    disabled={clearing}
+                    className="h-[30px] px-3 rounded-[8px] flex items-center gap-1.5 border border-[#F0D0C8] text-[#B8480F] hover:bg-[#FCEEE6] transition-colors duration-150 cursor-pointer outline-none disabled:opacity-50"
+                  >
+                    <Trash2 className="w-[13px] h-[13px]" />
+                    <span className="font-sans text-[12.5px] font-medium">Clear all</span>
+                  </button>
+                  <button
+                    onClick={handleLock}
+                    className="h-[30px] px-3 rounded-[8px] flex items-center gap-1.5 border border-[#DADDD7] text-[#59635D] hover:bg-[#F3F2ED] transition-colors duration-150 cursor-pointer outline-none"
+                  >
+                    <Lock className="w-[13px] h-[13px]" />
+                    <span className="font-sans text-[12.5px] font-medium">Lock</span>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {sharedError && (
+            <div className="flex items-center gap-2 rounded-[10px] border border-[#F0D9A8] bg-[#FDF7EA] px-3.5 py-2.5">
+              <AlertCircle className="w-[15px] h-[15px] text-[#B8801F] shrink-0" />
+              <span className="font-sans text-[13px] text-[#8A5F12]">{sharedError}</span>
+            </div>
+          )}
+
+          {!isAdmin && !loadingShared && (
+            <div className="flex items-center gap-2 rounded-[12px] border border-[#E6EAE3] bg-[#F7F9F6] px-4 py-3">
+              <Lock className="w-[15px] h-[15px] text-[#727873] shrink-0" />
+              <input
+                type="password"
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleUnlock(); }}
+                placeholder="Admin token"
+                className="flex-1 bg-transparent font-sans text-[13.5px] text-[#151A17] outline-none placeholder:text-[#9AA39D]"
+              />
+              <button
+                onClick={handleUnlock}
+                className="flex items-center gap-1.5 h-[30px] px-3 rounded-[8px] bg-[#176B4F] text-white font-sans text-[12.5px] font-medium cursor-pointer hover:bg-[#14694F] transition-colors duration-150 outline-none"
+              >
+                <Unlock className="w-[13px] h-[13px]" />
+                Unlock
+              </button>
+            </div>
+          )}
+
+          {isAdmin && (
+            sharedEntries.length === 0 ? (
+              <p className="font-sans text-[13.5px] text-[#9AA39D] italic py-2">
+                No questions have been asked yet on this deployment.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-2.5">
+                {sharedEntries.map((e) => <EntryRow key={e.id} entry={e} />)}
+              </div>
+            )
+          )}
         </div>
       </div>
     </div>

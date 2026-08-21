@@ -17,7 +17,7 @@ from typing import (Optional, List, Dict, Any, Callable, Awaitable, TypeVar,
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -826,20 +826,46 @@ async def process_text_query(req: TextQueryRequest):
     )
 
 
+_EMPTY_STATS = {"total_queries": 0, "total_refused": 0, "avg_retrieval_ms": None,
+                "avg_generation_ms": None, "avg_end_to_end_ms": None}
+
+
 @app.get("/api/insights")
-async def get_insights(limit: int = 100):
-    """Every question asked and answer given on this deployment, with the
-    full per-stage latency breakdown for each. Backs the site's Insights
-    page -- deliberately public, not admin-gated, so it can be viewed
-    directly on the site rather than requiring a token."""
+async def get_insights(limit: int = 100, x_admin_token: str = Header(default="")):
+    """Aggregate stats (totals, averages) are public -- no privacy risk, and
+    useful for anyone to see the system's real measured performance. The
+    actual per-query text (what was asked, what was answered) is real user
+    content from every visitor, not just the caller, so it requires the same
+    admin token as the other admin endpoints. Unlike require_admin(), a
+    missing/wrong token here does not raise -- it just omits `entries` and
+    still returns `stats`, so the public page keeps working without one."""
     if state.query_log is None:
-        return {"entries": [], "stats": {"total_queries": 0, "total_refused": 0,
-                "avg_retrieval_ms": None, "avg_generation_ms": None,
-                "avg_end_to_end_ms": None}}
+        return {"entries": [], "stats": _EMPTY_STATS, "admin": False}
+
     loop = asyncio.get_running_loop()
-    entries = await loop.run_in_executor(None, state.query_log.recent, limit)
     stats = await loop.run_in_executor(None, state.query_log.stats)
-    return {"entries": entries, "stats": stats}
+
+    expected = os.getenv("ADMIN_TOKEN", "")
+    is_admin = bool(expected) and x_admin_token == expected
+    if not is_admin:
+        return {"entries": [], "stats": stats, "admin": False}
+
+    entries = await loop.run_in_executor(None, state.query_log.recent, limit)
+    return {"entries": entries, "stats": stats, "admin": True}
+
+
+@app.delete("/api/insights")
+async def clear_insights(_: bool = Depends(require_admin)):
+    """Permanently deletes the shared server-side query log. Admin-gated via
+    require_admin, which raises 401/404 on a missing or wrong token -- unlike
+    the GET above, there is no silent no-token fallback for a destructive
+    action."""
+    if state.query_log is None:
+        return {"removed": 0}
+    loop = asyncio.get_running_loop()
+    removed = await loop.run_in_executor(None, state.query_log.clear)
+    logger.warning(f"Query log cleared via admin request: {removed} rows removed")
+    return {"removed": removed}
 
 
 class _LiveSTTSession:

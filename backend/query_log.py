@@ -135,6 +135,16 @@ class QueryLog:
             "avg_end_to_end_ms": round(row[4], 2) if row[4] is not None else None,
         }
 
+    def clear(self) -> int:
+        """Permanently delete every row. Returns the number removed. Callers
+        are responsible for authorization -- this method itself has none."""
+        cur = self.conn.execute("SELECT COUNT(*) FROM query_log")
+        n = cur.fetchone()[0] or 0
+        self.conn.execute("DELETE FROM query_log")
+        self.conn.commit()
+        self.conn.execute("VACUUM")
+        return n
+
     def close(self) -> None:
         self.conn.close()
 
@@ -201,6 +211,11 @@ if __name__ == "__main__":
 
         reopened = QueryLog(path)
         check("data survives reconnect", len(reopened.recent()) == 2)
+
+        removed = reopened.clear()
+        check("clear() returns the count removed", removed == 2)
+        check("clear() actually empties the table", reopened.recent() == [])
+        check("clear() resets stats", reopened.stats()["total_queries"] == 0)
         reopened.close()
 
     print(f"\n  {ok} passed, {fail} failed\n")

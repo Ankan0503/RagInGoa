@@ -15,6 +15,63 @@ export function resolveApiBaseUrl(): string {
   return `${protocol}//${host}${targetPort}`;
 }
 
+/** Per-browser query history for the Insights page. This is intentionally
+ *  separate from the server-side query log: the server log is shared across
+ *  every visitor (admin-gated, since it holds everyone's real questions),
+ *  while this is private to whoever is sitting at this browser -- visible
+ *  with no token, cleared with no token, because it can only ever contain
+ *  what this browser itself asked. */
+const LOCAL_LOG_KEY = "rag_local_query_log";
+const LOCAL_LOG_MAX = 200;
+
+export interface LocalLogEntry {
+  id: string;
+  ts: string;
+  query: string;
+  transcript: string | null;
+  answer: string;
+  refused: boolean;
+  provider: string | null;
+  model: string | null;
+  retrieval_ms: number | null;
+  generation_ms: number | null;
+  guardrail_ms: number | null;
+  end_to_end_ms: number | null;
+  grounding_score: number | null;
+  stages: Array<{ stage: string; ms: number; in_budget: boolean; detail?: string }>;
+}
+
+export function readLocalLog(): LocalLogEntry[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_LOG_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function appendLocalLog(entry: Omit<LocalLogEntry, "id">): void {
+  try {
+    const withId: LocalLogEntry = {
+      ...entry,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    };
+    const updated = [withId, ...readLocalLog()].slice(0, LOCAL_LOG_MAX);
+    localStorage.setItem(LOCAL_LOG_KEY, JSON.stringify(updated));
+  } catch {
+    // localStorage can throw (quota exceeded, private browsing) -- a logging
+    // failure must never break the actual request that triggered it.
+  }
+}
+
+export function clearLocalLog(): void {
+  try {
+    localStorage.removeItem(LOCAL_LOG_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 export interface SourceHit {
   score: number;
   strategy: string;
@@ -114,6 +171,11 @@ export function RagProvider({ children }: { children: ReactNode }) {
   const wsRef = useRef<WebSocket | null>(null);
   const isStreamingRef = useRef(false);
   const sttLatencyRef = useRef<number | null>(null);
+  // handleServerMessage is set up once and would otherwise see a stale
+  // `query` from mount time -- this ref is the live value at send-time,
+  // for local-log entries written when "done"/"refused" arrive.
+  const currentQueryRef = useRef<string>("");
+  const currentTranscriptRef = useRef<string | null>(null);
 
   // Live audio capture. MediaRecorder is gone: it produces webm/opus in
   // ~250ms containers, but Sarvam's realtime socket wants a continuous raw
@@ -231,6 +293,21 @@ export function RagProvider({ children }: { children: ReactNode }) {
           retrieval_score: data.guardrails?.retrieval_score ?? null,
         }));
       }
+      appendLocalLog({
+        ts: new Date().toISOString(),
+        query: currentQueryRef.current,
+        transcript: currentTranscriptRef.current,
+        answer: data.answer ?? "",
+        refused: true,
+        provider: data.metrics?.llm_provider ?? null,
+        model: data.metrics?.llm_model ?? null,
+        retrieval_ms: data.metrics?.retrieval_ms ?? null,
+        generation_ms: data.metrics?.generation_ms ?? null,
+        guardrail_ms: data.metrics?.guardrail_ms ?? null,
+        end_to_end_ms: data.metrics?.wall_ms ?? null,
+        grounding_score: data.guardrails?.grounding_score ?? null,
+        stages: data.metrics?.stages ?? [],
+      });
     } else if (data.type === "retrieval") {
       setStatusStage("generating");
       setSources(data.sources || []);
@@ -266,6 +343,21 @@ export function RagProvider({ children }: { children: ReactNode }) {
           retrieval_score: data.guardrails?.retrieval_score ?? prev?.retrieval_score ?? null,
         }));
       }
+      appendLocalLog({
+        ts: new Date().toISOString(),
+        query: currentQueryRef.current,
+        transcript: currentTranscriptRef.current,
+        answer: data.full_answer ?? "",
+        refused: false,
+        provider: data.metrics?.llm_provider ?? null,
+        model: data.metrics?.llm_model ?? null,
+        retrieval_ms: data.metrics?.retrieval_ms ?? null,
+        generation_ms: data.metrics?.generation_ms ?? null,
+        guardrail_ms: data.metrics?.guardrail_ms ?? null,
+        end_to_end_ms: data.metrics?.wall_ms ?? null,
+        grounding_score: data.guardrails?.grounding_score ?? null,
+        stages: data.metrics?.stages ?? [],
+      });
     } else if (data.type === "error") {
       isStreamingRef.current = false;
       setIsProcessing(false);
@@ -400,6 +492,8 @@ export function RagProvider({ children }: { children: ReactNode }) {
     isStreamingRef.current = false;
     setAnswer("");
     setGroundingWarning(null);
+    currentQueryRef.current = trimmed;
+    currentTranscriptRef.current = sttLatencyMs != null ? trimmed : null;
 
     // Map UI strategy label to backend strategy key
     let strategyKey: string | undefined = undefined;
@@ -433,6 +527,21 @@ export function RagProvider({ children }: { children: ReactNode }) {
           setMetrics(data.metrics || null);
           setStatusStage("done");
           setIsProcessing(false);
+          appendLocalLog({
+            ts: new Date().toISOString(),
+            query: trimmed,
+            transcript: null,
+            answer: data.answer ?? "",
+            refused: Boolean(data.refused),
+            provider: data.metrics?.llm_provider ?? null,
+            model: data.metrics?.llm_model ?? null,
+            retrieval_ms: data.metrics?.retrieval_ms ?? null,
+            generation_ms: data.metrics?.generation_ms ?? null,
+            guardrail_ms: data.metrics?.guardrail_ms ?? null,
+            end_to_end_ms: data.metrics?.wall_ms ?? null,
+            grounding_score: data.guardrails?.grounding_score ?? null,
+            stages: data.metrics?.stages ?? [],
+          });
         })
         .catch((err) => {
           setError(`Request failed: ${err.message}`);
