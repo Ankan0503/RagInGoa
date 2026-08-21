@@ -107,6 +107,10 @@ class BaseLLM:
                         obj = json.loads(chunk)
                     except json.JSONDecodeError:
                         continue
+                    if "error" in obj:
+                        err = obj["error"]
+                        msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                        raise LLMError(f"{self.provider}: mid-stream error: {msg[:300]}")
                     choices = obj.get("choices") or []
                     if not choices:
                         continue
