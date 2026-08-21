@@ -30,7 +30,10 @@ function SourceRow({ source }: { source: Source }) {
           </span>
         </div>
         {/* Passage Title */}
-        <span className="font-sans font-normal text-[14px] text-[#252B27] group-hover:text-[#176B4F] transition-colors duration-150">
+        <span
+          title={source.passage}
+          className="font-sans font-normal text-[14px] text-[#252B27] group-hover:text-[#176B4F] transition-colors duration-150 truncate max-w-[180px]"
+        >
           {source.passage}
         </span>
       </div>
@@ -61,11 +64,15 @@ export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () =>
   // silently kept showing fake data if a real request came back empty.
   const hasAnswered = sources.length > 0 || Boolean(answer) || Boolean(query);
 
-  const displaySources: Source[] = sources.slice(0, 3).map((s, idx) => ({
-    id: String(idx + 1).padStart(2, "0"),
-    passage: `Passage #${s.parent_id || idx + 1}`,
-    score: typeof s.score === "number" ? s.score.toFixed(2) : "—",
-  }));
+  const displaySources: Source[] = sources.slice(0, 3).map((s, idx) => {
+    const text = (s.child_text || s.parent_text || "").trim();
+    const snippet = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+    return {
+      id: String(idx + 1).padStart(2, "0"),
+      passage: snippet || `Passage #${s.parent_id || idx + 1}`,
+      score: typeof s.score === "number" ? s.score.toFixed(2) : "—",
+    };
+  });
 
   const displayQuery = query || null;
   const displayAnswer = answer || null;
