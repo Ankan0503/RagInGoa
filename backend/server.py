@@ -883,19 +883,37 @@ class _LiveSTTSession:
         self.pump: Optional[asyncio.Task] = None
         self.text = ""
         self.started_at = 0.0
+        self._connect_task: Optional[asyncio.Task] = None
+        # Audio the browser sends while Sarvam's handshake is still in
+        # flight. The outer WebSocket loop reads one message at a time
+        # (`while True: await websocket.receive()`), so if start() blocked
+        # on the handshake, every audio frame arriving during that ~1-3s
+        # network round trip would sit unprocessed until it returned -- the
+        # mic looks active immediately but nothing visibly happens (no
+        # partial transcript) until the connection finally lands. Buffering
+        # here instead of blocking there is what actually removes that gap
+        # from the critical path, rather than just relabelling the wait.
+        self._pending_audio: List[bytes] = []
 
     async def start(self) -> bool:
+        self._connect_task = asyncio.create_task(self._connect())
+        await self.websocket.send_json({"type": "status", "stage": "connecting"})
+        return True
+
+    async def _connect(self):
         try:
             self.stt = await SarvamRealtimeSTT().__aenter__()
         except STTRealtimeError as e:
             logger.error(f"realtime STT unavailable: {e}")
             await self.websocket.send_json(
                 {"type": "error", "message": "वॉइस सेवा उपलब्ध नहीं है।"})
-            return False
+            return
         self.started_at = time.perf_counter()
         self.pump = asyncio.create_task(self._pump())
+        for chunk in self._pending_audio:
+            await self.stt.send_audio(chunk)
+        self._pending_audio.clear()
         await self.websocket.send_json({"type": "status", "stage": "listening"})
-        return True
 
     async def _pump(self):
         try:
@@ -916,9 +934,22 @@ class _LiveSTTSession:
     async def feed(self, pcm: bytes):
         if self.stt is not None:
             await self.stt.send_audio(pcm)
+        else:
+            # Still connecting -- held here and flushed in order once ready.
+            self._pending_audio.append(pcm)
 
     async def stop(self) -> float:
         """Close the STT side and return the elapsed listening time in ms."""
+        if self._connect_task is not None and not self._connect_task.done():
+            # The mic was released before the handshake even finished. Wait
+            # briefly rather than tearing this down mid-connect, which would
+            # otherwise either leak the socket or race with _connect() still
+            # trying to set self.stt right as this clears it.
+            try:
+                await asyncio.wait_for(asyncio.shield(self._connect_task), timeout=3.0)
+            except Exception:
+                pass
+
         elapsed = (time.perf_counter() - self.started_at) * 1000.0 if self.started_at else 0.0
         if self.stt is not None:
             await self.stt.signal_end()
@@ -930,17 +961,25 @@ class _LiveSTTSession:
             await self.stt.close()
         if self.pump is not None and not self.pump.done():
             self.pump.cancel()
+        if self._connect_task is not None and not self._connect_task.done():
+            self._connect_task.cancel()
         self.stt = None
         self.pump = None
+        self._connect_task = None
+        self._pending_audio.clear()
         return round(elapsed, 2)
 
     async def abort(self):
+        if self._connect_task is not None and not self._connect_task.done():
+            self._connect_task.cancel()
         if self.pump is not None and not self.pump.done():
             self.pump.cancel()
         if self.stt is not None:
             await self.stt.close()
         self.stt = None
         self.pump = None
+        self._connect_task = None
+        self._pending_audio.clear()
 
 
 @app.websocket("/ws/voice-rag")

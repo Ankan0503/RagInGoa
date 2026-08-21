@@ -76,7 +76,8 @@ export default function AskHero() {
     stopListening,
     selectedStrategy,
     setSelectedStrategy,
-    awaitingSend
+    awaitingSend,
+    statusStage
   } = useRag();
 
   const [showDropdown, setShowDropdown] = useState(false);
@@ -177,7 +178,9 @@ export default function AskHero() {
           {/* Card title - Tap to speak your question */}
           <h2 className="font-sans text-[18px] font-semibold text-[#176B4F] text-center select-none">
             {isListening
-              ? "Listening to your question..."
+              ? statusStage === "connecting"
+                ? "Connecting…"
+                : "Listening to your question..."
               : awaitingSend
                 ? "Check the text, then send"
                 : isProcessing

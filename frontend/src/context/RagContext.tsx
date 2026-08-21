@@ -103,8 +103,9 @@ export interface LatencyMetrics {
   retrieval_score?: number | null;
 }
 
-export type PipelineStage = 
+export type PipelineStage =
   | "idle"
+  | "connecting"
   | "listening"
   | "transcribing"
   | "retrieving"
@@ -413,6 +414,15 @@ export function RagProvider({ children }: { children: ReactNode }) {
       setPendingTranscript("");
       setAwaitingSend(false);
       setAnswer("");
+      setStatusStage("connecting");
+
+      // Sent first, before getUserMedia, so the server's Sarvam handshake
+      // (a real network round trip, ~1-3s) runs concurrently with the
+      // browser's own mic-permission prompt and audio graph setup instead
+      // of strictly after them. The server buffers any audio that arrives
+      // before its side is ready, so this is safe even if getUserMedia
+      // resolves first.
+      ws.send(JSON.stringify({ type: "stt_start" }));
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
@@ -430,8 +440,6 @@ export function RagProvider({ children }: { children: ReactNode }) {
       const processor = ctx.createScriptProcessor(4096, 1, 1);
       processorRef.current = processor;
 
-      ws.send(JSON.stringify({ type: "stt_start" }));
-
       processor.onaudioprocess = (e) => {
         const socket = wsRef.current;
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -443,8 +451,12 @@ export function RagProvider({ children }: { children: ReactNode }) {
       // browsers will not run onaudioprocess for a disconnected node.
       processor.connect(ctx.destination);
 
+      // isListening drives the mic UI/animation and can flip as soon as
+      // capture is physically wired up. statusStage stays whatever the
+      // server's last "status" message set it to ("connecting" until the
+      // Sarvam handshake completes, then "listening") -- overriding it here
+      // would show "listening" before the server can actually hear anything.
       setIsListening(true);
-      setStatusStage("listening");
     } catch (err: any) {
       console.error("Microphone error:", err);
       setError("Microphone permission denied or device not found.");
