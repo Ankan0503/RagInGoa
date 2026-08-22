@@ -38,6 +38,8 @@ export interface LocalLogEntry {
   guardrail_ms: number | null;
   end_to_end_ms: number | null;
   grounding_score: number | null;
+  // Null on the REST fallback path, which cannot measure a first token.
+  ttft_ms?: number | null;
   stages: Array<{ stage: string; ms: number; in_budget: boolean; detail?: string }>;
 }
 
@@ -307,6 +309,7 @@ export function RagProvider({ children }: { children: ReactNode }) {
         guardrail_ms: data.metrics?.guardrail_ms ?? null,
         end_to_end_ms: data.metrics?.wall_ms ?? null,
         grounding_score: data.guardrails?.grounding_score ?? null,
+        ttft_ms: data.metrics?.ttft_ms ?? null,
         stages: data.metrics?.stages ?? [],
       });
     } else if (data.type === "retrieval") {
@@ -357,6 +360,7 @@ export function RagProvider({ children }: { children: ReactNode }) {
         guardrail_ms: data.metrics?.guardrail_ms ?? null,
         end_to_end_ms: data.metrics?.wall_ms ?? null,
         grounding_score: data.guardrails?.grounding_score ?? null,
+        ttft_ms: data.metrics?.ttft_ms ?? null,
         stages: data.metrics?.stages ?? [],
       });
     } else if (data.type === "error") {

@@ -428,6 +428,7 @@ async def _log_query(
     guardrail_ms: Optional[float] = None,
     end_to_end_ms: Optional[float] = None,
     grounding_score: Optional[float] = None,
+    ttft_ms: Optional[float] = None,
 ) -> None:
     """The one place every completed request -- voice or text, streamed or
     not, refused or answered -- gets printed and persisted. Printed every
@@ -435,8 +436,10 @@ async def _log_query(
     opening the Insights page; persisted so the Insights page has something
     to show after the log has scrolled past, and survives a restart.
     """
+    ttft_txt = f"ttft={ttft_ms:.1f}ms " if ttft_ms is not None else ""
     logger.info(
-        f"[QUERY] retrieval={retrieval_ms or 0:.1f}ms llm={generation_ms or 0:.1f}ms "
+        f"[QUERY] retrieval={retrieval_ms or 0:.1f}ms {ttft_txt}"
+        f"llm={generation_ms or 0:.1f}ms "
         f"end_to_end={end_to_end_ms or 0:.1f}ms refused={refused} "
         f"{query!r} -> {answer[:120]!r}"
     )
@@ -448,7 +451,7 @@ async def _log_query(
         provider=provider, model=model,
         retrieval_ms=retrieval_ms, generation_ms=generation_ms,
         guardrail_ms=guardrail_ms, end_to_end_ms=end_to_end_ms,
-        grounding_score=grounding_score,
+        grounding_score=grounding_score, ttft_ms=ttft_ms,
     )
     try:
         await asyncio.get_running_loop().run_in_executor(
@@ -640,6 +643,7 @@ async def run_rag_pipeline_streaming(
                 guardrail_ms=metrics.get("guardrail_ms"),
                 end_to_end_ms=metrics.get("wall_ms"),
                 grounding_score=guardrails.get("grounding_score"),
+                ttft_ms=metrics.get("ttft_ms"),
             )
         yield event
 
@@ -838,7 +842,8 @@ async def process_text_query(req: TextQueryRequest):
 
 
 _EMPTY_STATS = {"total_queries": 0, "total_refused": 0, "avg_retrieval_ms": None,
-                "avg_generation_ms": None, "avg_end_to_end_ms": None}
+                "avg_generation_ms": None, "avg_end_to_end_ms": None,
+                "avg_ttft_ms": None}
 
 
 @app.get("/api/insights")

@@ -51,8 +51,16 @@ function SourceRow({ source }: { source: Source }) {
 export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () => void }) {
   const {
     query, answer, sources, metrics, groundingWarning, isProcessing,
-    pendingTranscript, awaitingSend, isListening, sendPending, discardPending
+    pendingTranscript, awaitingSend, isListening, sendPending, discardPending,
+    statusStage
   } = useRag();
+
+  // Tokens are appended one delta at a time as they arrive from the provider,
+  // but a short answer can complete in a few hundred ms, which reads as a
+  // single flash rather than as generation. The caret marks the stream as
+  // still open -- it is driven by the real pipeline stage, so it disappears
+  // the moment the last token lands. Nothing here delays or paces the text.
+  const isStreaming = statusStage === "generating" && Boolean(answer);
 
   // No placeholder content anywhere below: a fresh page, or a query with no
   // sources/answer yet, shows an honest empty/loading state rather than
@@ -93,6 +101,14 @@ export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () =>
         boxShadow: "0 8px 28px rgba(35, 54, 44, 0.055)"
       }}
     >
+      <style>{`
+        @keyframes stream-caret { 0%, 45% { opacity: 1; } 55%, 100% { opacity: 0; } }
+        .animate-stream-caret { animation: stream-caret 1s steps(1, end) infinite; }
+        @media (prefers-reduced-motion: reduce) {
+          .animate-stream-caret { animation: none; opacity: 1; }
+        }
+      `}</style>
+
       {/* UPPER SECTION: Question & Generated Answer */}
       <div className="flex flex-col">
         {/* Row 1: Label and Decorative Wave indicator */}
@@ -189,6 +205,12 @@ export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () =>
             : isProcessing
               ? "Generating an answer…"
               : "No answer yet — ask a question to see one here."}
+          {isStreaming && (
+            <span
+              aria-hidden="true"
+              className="inline-block w-[2px] h-[1em] ml-[2px] align-text-bottom bg-[#176B4F] animate-stream-caret"
+            />
+          )}
         </p>
 
         {groundingWarning && (

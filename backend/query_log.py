@@ -40,10 +40,19 @@ CREATE TABLE IF NOT EXISTS query_log (
     guardrail_ms  REAL,
     end_to_end_ms REAL,
     grounding_score REAL,
+    ttft_ms       REAL,
     stages_json   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_query_log_ts ON query_log(ts);
 """
+
+# Columns added after the table first shipped. CREATE TABLE IF NOT EXISTS does
+# nothing to an existing table, so a deployment that already has rows would
+# keep the old shape and every INSERT naming a new column would fail. Each
+# entry is applied only when the column is genuinely absent.
+_MIGRATIONS = (
+    ("ttft_ms", "ALTER TABLE query_log ADD COLUMN ttft_ms REAL"),
+)
 
 
 @dataclass
@@ -61,6 +70,10 @@ class QueryLogEntry:
     guardrail_ms: Optional[float] = None
     end_to_end_ms: Optional[float] = None
     grounding_score: Optional[float] = None
+    # Time to first token. Only the streaming path can measure this -- the
+    # REST path calls generate() and sees the whole completion at once -- so
+    # it is None for non-streamed requests rather than 0.
+    ttft_ms: Optional[float] = None
 
 
 class QueryLog:
@@ -77,23 +90,31 @@ class QueryLog:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(_SCHEMA)
+        self._migrate()
         self.conn.commit()
         logger.info(f"Query log ready at {path}")
+
+    def _migrate(self) -> None:
+        existing = {r[1] for r in self.conn.execute("PRAGMA table_info(query_log)")}
+        for column, ddl in _MIGRATIONS:
+            if column not in existing:
+                logger.info(f"Adding missing query_log column: {column}")
+                self.conn.execute(ddl)
 
     def record(self, entry: QueryLogEntry) -> None:
         self.conn.execute(
             """INSERT INTO query_log
                (ts, query, transcript, answer, refused, refusal_reason,
                 provider, model, retrieval_ms, generation_ms, guardrail_ms,
-                end_to_end_ms, grounding_score, stages_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                end_to_end_ms, grounding_score, ttft_ms, stages_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 datetime.now(timezone.utc).isoformat(),
                 entry.query, entry.transcript, entry.answer,
                 1 if entry.refused else 0, entry.refusal_reason,
                 entry.provider, entry.model,
                 entry.retrieval_ms, entry.generation_ms, entry.guardrail_ms,
-                entry.end_to_end_ms, entry.grounding_score,
+                entry.end_to_end_ms, entry.grounding_score, entry.ttft_ms,
                 json.dumps(entry.stages, ensure_ascii=False),
             ),
         )
@@ -104,7 +125,7 @@ class QueryLog:
         rows = self.conn.execute(
             """SELECT id, ts, query, transcript, answer, refused, refusal_reason,
                       provider, model, retrieval_ms, generation_ms, guardrail_ms,
-                      end_to_end_ms, grounding_score, stages_json
+                      end_to_end_ms, grounding_score, ttft_ms, stages_json
                FROM query_log ORDER BY id DESC LIMIT ?""",
             (limit,),
         ).fetchall()
@@ -116,14 +137,16 @@ class QueryLog:
                 "provider": r[7], "model": r[8], "retrieval_ms": r[9],
                 "generation_ms": r[10], "guardrail_ms": r[11],
                 "end_to_end_ms": r[12], "grounding_score": r[13],
-                "stages": json.loads(r[14]) if r[14] else [],
+                "ttft_ms": r[14],
+                "stages": json.loads(r[15]) if r[15] else [],
             })
         return out
 
     def stats(self) -> Dict[str, Any]:
         row = self.conn.execute(
             """SELECT COUNT(*), SUM(refused),
-                      AVG(retrieval_ms), AVG(generation_ms), AVG(end_to_end_ms)
+                      AVG(retrieval_ms), AVG(generation_ms), AVG(end_to_end_ms),
+                      AVG(ttft_ms)
                FROM query_log"""
         ).fetchone()
         total = row[0] or 0
@@ -133,6 +156,10 @@ class QueryLog:
             "avg_retrieval_ms": round(row[2], 2) if row[2] is not None else None,
             "avg_generation_ms": round(row[3], 2) if row[3] is not None else None,
             "avg_end_to_end_ms": round(row[4], 2) if row[4] is not None else None,
+            # AVG() ignores NULLs, so this averages only streamed requests --
+            # REST ones cannot measure a first token and must not be counted
+            # as zero, which would understate it.
+            "avg_ttft_ms": round(row[5], 2) if row[5] is not None else None,
         }
 
     def clear(self) -> int:
@@ -180,7 +207,7 @@ if __name__ == "__main__":
             query="कॉर्पोरेशन क्या है?", answer="एक व्यावसायिक इकाई।",
             refused=False, provider="groq", model="qwen/qwen3-32b",
             retrieval_ms=90.1, generation_ms=560.2, guardrail_ms=0.1,
-            end_to_end_ms=651.0, grounding_score=0.71,
+            end_to_end_ms=651.0, grounding_score=0.71, ttft_ms=180.5,
             stages=[{"stage": "embed_query", "ms": 25.6, "in_budget": True, "detail": ""}],
         ))
         log.record(QueryLogEntry(
@@ -206,6 +233,11 @@ if __name__ == "__main__":
         check("stats total_refused", s["total_refused"] == 1)
         check("stats avg_retrieval_ms averages only non-null rows",
               s["avg_retrieval_ms"] == 90.1)
+        check("ttft round-trips", recent[1]["ttft_ms"] == 180.5)
+        check("ttft is None on the row that had none",
+              recent[0]["ttft_ms"] is None)
+        check("avg_ttft_ms ignores rows without a first token",
+              s["avg_ttft_ms"] == 180.5)
 
         log.close()
 
@@ -217,6 +249,36 @@ if __name__ == "__main__":
         check("clear() actually empties the table", reopened.recent() == [])
         check("clear() resets stats", reopened.stats()["total_queries"] == 0)
         reopened.close()
+
+        # A database created before ttft_ms existed must upgrade in place and
+        # keep its rows -- the deployed log already has traffic in it, so a
+        # migration that dropped or failed on old data would lose real history.
+        legacy = os.path.join(tmp, "legacy.sqlite")
+        lc = sqlite3.connect(legacy)
+        lc.executescript("""
+            CREATE TABLE query_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+                query TEXT NOT NULL, transcript TEXT, answer TEXT NOT NULL,
+                refused INTEGER NOT NULL, refusal_reason TEXT, provider TEXT,
+                model TEXT, retrieval_ms REAL, generation_ms REAL,
+                guardrail_ms REAL, end_to_end_ms REAL, grounding_score REAL,
+                stages_json TEXT NOT NULL);
+        """)
+        lc.execute("INSERT INTO query_log (ts, query, answer, refused, stages_json)"
+                   " VALUES ('2026-01-01T00:00:00Z', 'पुराना प्रश्न', 'पुराना उत्तर', 0, '[]')")
+        lc.commit()
+        lc.close()
+
+        upgraded = QueryLog(legacy)
+        rows = upgraded.recent()
+        check("legacy db keeps its existing row", len(rows) == 1)
+        check("legacy row still readable", rows[0]["query"] == "पुराना प्रश्न")
+        check("legacy row reports ttft_ms as None", rows[0]["ttft_ms"] is None)
+        upgraded.record(QueryLogEntry(query="नया", answer="उत्तर", refused=False,
+                                      ttft_ms=99.9))
+        check("insert works after migration",
+              upgraded.recent()[0]["ttft_ms"] == 99.9)
+        upgraded.close()
 
     print(f"\n  {ok} passed, {fail} failed\n")
     sys.exit(1 if fail else 0)

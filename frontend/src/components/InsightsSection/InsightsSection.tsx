@@ -29,6 +29,10 @@ interface QueryLogEntry {
   guardrail_ms: number | null;
   end_to_end_ms: number | null;
   grounding_score: number | null;
+  // Time to first token: when the answer STARTS appearing, which is what a
+  // user actually perceives as the wait. Only streamed (voice/WebSocket)
+  // requests can measure it, so it is null for REST ones rather than 0.
+  ttft_ms?: number | null;
   stages: StageTiming[];
 }
 
@@ -38,6 +42,7 @@ interface SharedStats {
   avg_retrieval_ms: number | null;
   avg_generation_ms: number | null;
   avg_end_to_end_ms: number | null;
+  avg_ttft_ms?: number | null;
 }
 
 interface InsightsResponse {
@@ -142,6 +147,14 @@ function EntryRow({ entry }: { entry: QueryLogEntry }) {
           <div className="hidden sm:flex items-center gap-2.5 font-sans text-[11.5px] text-[#727873] tabular-nums">
             <span>R {fmtMs(entry.retrieval_ms)}</span>
             <span>·</span>
+            {entry.ttft_ms != null && (
+              <>
+                <span title="Time to first token — when the answer starts appearing">
+                  TTFT {fmtMs(entry.ttft_ms)}
+                </span>
+                <span>·</span>
+              </>
+            )}
             <span>L {fmtMs(entry.generation_ms)}</span>
             <span>·</span>
             <span className="font-medium text-[#3E453F]">E2E {fmtMs(entry.end_to_end_ms)}</span>
@@ -173,6 +186,19 @@ function EntryRow({ entry }: { entry: QueryLogEntry }) {
                     {fmtMs(entry.retrieval_ms)}
                   </span>
                 </div>
+                {entry.ttft_ms != null && (
+                  <div className="flex items-center justify-between py-1 px-3">
+                    <span className="font-sans text-[12.5px] font-medium text-[#3E453F]">
+                      Time to first token
+                      <span className="text-[11px] text-[#9AA39D] font-normal ml-1.5">
+                        answer starts appearing
+                      </span>
+                    </span>
+                    <span className="font-sans text-[12.5px] font-semibold text-[#176B4F] tabular-nums">
+                      {fmtMs(entry.ttft_ms)}
+                    </span>
+                  </div>
+                )}
                 <div className="flex items-center justify-between py-1 px-3">
                   <span className="font-sans text-[12.5px] font-medium text-[#3E453F]">LLM generation</span>
                   <span className="font-sans text-[12.5px] font-semibold text-[#176B4F] tabular-nums">
@@ -207,7 +233,7 @@ function localToEntry(l: LocalLogEntry): QueryLogEntry {
     answer: l.answer, refused: l.refused, provider: l.provider, model: l.model,
     retrieval_ms: l.retrieval_ms, generation_ms: l.generation_ms,
     guardrail_ms: l.guardrail_ms, end_to_end_ms: l.end_to_end_ms,
-    grounding_score: l.grounding_score, stages: l.stages,
+    grounding_score: l.grounding_score, ttft_ms: l.ttft_ms, stages: l.stages,
   };
 }
 
@@ -326,6 +352,7 @@ export default function InsightsSection() {
             <StatTile label="Total queries" value={String(stats.total_queries)} />
             <StatTile label="Refused" value={String(stats.total_refused)} />
             <StatTile label="Avg retrieval" value={fmtMs(stats.avg_retrieval_ms)} />
+            <StatTile label="Avg first token" value={fmtMs(stats.avg_ttft_ms ?? null)} />
             <StatTile label="Avg generation" value={fmtMs(stats.avg_generation_ms)} />
             <StatTile label="Avg end-to-end" value={fmtMs(stats.avg_end_to_end_ms)} />
           </div>
