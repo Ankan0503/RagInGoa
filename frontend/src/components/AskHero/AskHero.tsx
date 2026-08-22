@@ -9,76 +9,6 @@ import BottomAskSection from "../BottomAskSection/BottomAskSection";
 import { useRag } from "../../context/RagContext";
 
 /**
- * The microphone has a real, unavoidable wait in it: the Sarvam realtime
- * socket has to open before a single word can be captured. The interface has
- * to say so, and the three states below are how it does that.
- *
- * Every colour here is derived from the palette the rest of the page already
- * uses -- the forest green #176B4F and the warm #F2B66C of the headline mark.
- * Stock Tailwind `emerald`/`amber` were doing this job before and they are far
- * more saturated than anything else on the page, so the moment the mic lit up
- * the card stopped looking like it belonged to the same product.
- *
- * Each state also gets ONE animation, not three. Previously "connecting" ran a
- * pulsing banner, a spinning icon, a pulsing halo and fourteen pulsing bars
- * simultaneously; motion that competes with itself reads as busy, not as
- * responsive.
- */
-type MicState = "idle" | "connecting" | "listening";
-
-interface MicTheme {
-  halo: string;
-  ring: string;
-  button: string;
-  buttonGlow: string;
-  cardBorder: string;
-  cardShadow: string;
-  pill: string;
-  pillDot: string;
-  barSoft: string;
-  barStrong: string;
-}
-
-const MIC_THEME: Record<MicState, MicTheme> = {
-  idle: {
-    halo: "bg-[#F2F6F2]",
-    ring: "bg-[#DCEBE2]",
-    button: "bg-[#176B4F] hover:bg-[#125B43]",
-    buttonGlow: "0 6px 18px rgba(23,107,79,0.22)",
-    cardBorder: "border-[#EBE9E2]",
-    cardShadow: "0 1px 2px rgba(35,54,44,0.04), 0 14px 34px rgba(35,54,44,0.055)",
-    pill: "bg-[#F4F7F3] border-[#DFE7DC] text-[#3F4A43]",
-    pillDot: "bg-[#B3C2B7]",
-    barSoft: "bg-[#CFDFD5]",
-    barStrong: "bg-[#A6C4B3]",
-  },
-  connecting: {
-    halo: "bg-[#FBF3E7]",
-    ring: "bg-[#F1DFC0]",
-    button: "bg-[#C0863B] hover:bg-[#A87031]",
-    buttonGlow: "0 6px 18px rgba(192,134,59,0.26)",
-    cardBorder: "border-[#EBD6B2]",
-    cardShadow: "0 1px 2px rgba(150,100,30,0.05), 0 14px 34px rgba(150,100,30,0.10)",
-    pill: "bg-[#FDF6EC] border-[#EBD6B2] text-[#7C551F]",
-    pillDot: "bg-[#D9AE6E]",
-    barSoft: "bg-[#EBD3AC]",
-    barStrong: "bg-[#D3A05A]",
-  },
-  listening: {
-    halo: "bg-[#E6F4EC]",
-    ring: "bg-[#B4DFC9]",
-    button: "bg-[#0E7A57] hover:bg-[#0B6748]",
-    buttonGlow: "0 8px 24px rgba(14,122,87,0.30)",
-    cardBorder: "border-[#9FD6BC]",
-    cardShadow: "0 1px 2px rgba(14,122,87,0.06), 0 14px 36px rgba(14,122,87,0.13)",
-    pill: "bg-[#E9F6F0] border-[#A6D8C1] text-[#0C5C42]",
-    pillDot: "bg-[#16A46F]",
-    barSoft: "bg-[#9AD5BA]",
-    barStrong: "bg-[#16A46F]",
-  },
-};
-
-/**
  * AudioWaveform - Horizontal bar visualization flanking the microphone button.
  */
 interface AudioWaveformProps {
@@ -94,11 +24,8 @@ export function AudioWaveform({ side, isAnimating, statusStage }: AudioWaveformP
       ? [4, 6, 10, 6, 12, 18, 8, 14, 24, 16, 28, 12, 8, 4]
       : [4, 8, 12, 28, 16, 24, 14, 8, 18, 12, 6, 10, 6, 4];
 
-  const state: MicState =
-    statusStage === "connecting" ? "connecting"
-      : statusStage === "listening" ? "listening"
-        : "idle";
-  const theme = MIC_THEME[state];
+  const isConnecting = statusStage === "connecting";
+  const isListening = statusStage === "listening";
 
   return (
     <div
@@ -106,61 +33,42 @@ export function AudioWaveform({ side, isAnimating, statusStage }: AudioWaveformP
         } pointer-events-none`}
       aria-hidden="true"
     >
-      <div className="flex items-center gap-[4px] h-[36px]">
+      <div className="flex items-center gap-[4px] h-[36px] opacity-90">
         {bars.map((height, idx) => {
-          // While connecting, a single highlight travels outward from the
-          // microphone on both sides. It is indeterminate on purpose -- the
-          // socket handshake has no progress to report -- but a travelling
-          // pulse reads as "working on it" where a uniform blink reads as a
-          // stuck element.
-          const outward = side === "left" ? bars.length - 1 - idx : idx;
-          const style: React.CSSProperties = { height: `${height}px` };
+          const delay = idx * (isListening ? 0.06 : 0.1);
+          const style: React.CSSProperties = isAnimating
+            ? {
+              animation: isListening
+                ? `pulse-waveform 0.8s ease-in-out infinite alternate`
+                : `pulse-waveform 1.8s ease-in-out infinite alternate`,
+              animationDelay: `${delay}s`,
+              height: `${height}px`,
+            }
+            : {
+              height: `${height}px`,
+              transition: "height 0.3s ease",
+            };
 
-          if (state === "connecting") {
-            style.animation = "wave-scan 1.5s ease-in-out infinite";
-            style.animationDelay = `${outward * 0.075}s`;
-          } else if (state === "listening") {
-            style.animation = "wave-live 0.75s ease-in-out infinite alternate";
-            style.animationDelay = `${idx * 0.05}s`;
-          } else if (isAnimating) {
-            style.animation = "wave-idle 1.9s ease-in-out infinite alternate";
-            style.animationDelay = `${idx * 0.09}s`;
-          } else {
-            style.transition = "height 0.3s ease";
+          let bgClass = "bg-[#C2D8CB]";
+          if (isConnecting) {
+            bgClass = height > 14 ? "bg-[#F59E0B]" : "bg-[#FCD34D]";
+          } else if (isListening) {
+            bgClass = height > 16 ? "bg-[#10B981]" : "bg-[#34D399]";
+          } else if (height > 18) {
+            bgClass = "bg-[#176B4F] opacity-65";
+          } else if (height > 8) {
+            bgClass = "bg-[#A8C6B6]";
           }
 
           return (
             <div
               key={idx}
-              className={`w-[3px] rounded-full transition-colors duration-500 ${height > 14 ? theme.barStrong : theme.barSoft
-                }`}
+              className={`w-[3px] rounded-full transition-colors duration-300 ${bgClass}`}
               style={style}
             />
           );
         })}
       </div>
-    </div>
-  );
-}
-
-/**
- * StatusPill - one row, one voice. The Hindi line leads because the product is
- * Hindi-first; the English follows it as a quieter gloss rather than as a
- * parenthetical, which is what made these read like debug strings.
- */
-function StatusPill({
-  theme, icon, hi, en,
-}: { theme: MicTheme; icon: React.ReactNode; hi: string; en: string }) {
-  return (
-    <div
-      className={`inline-flex items-center gap-2 rounded-full border pl-2.5 pr-3.5 py-[5px] transition-colors duration-500 animate-rise ${theme.pill}`}
-    >
-      <span className="shrink-0 flex items-center">{icon}</span>
-      <span className="font-sans text-[13px] font-medium leading-none whitespace-nowrap">{hi}</span>
-      <span className={`h-[3px] w-[3px] rounded-full shrink-0 opacity-60 ${theme.pillDot}`} />
-      <span className="font-sans text-[12px] font-normal leading-none opacity-65 whitespace-nowrap">
-        {en}
-      </span>
     </div>
   );
 }
@@ -182,18 +90,14 @@ export default function AskHero() {
 
   const [showDropdown, setShowDropdown] = useState(false);
 
-  const isConnecting = isListening && statusStage === "connecting";
-  const isLiveListening = isListening && statusStage === "listening";
-
-  const micState: MicState = isConnecting ? "connecting"
-    : isLiveListening ? "listening"
-      : "idle";
-  const theme = MIC_THEME[micState];
+  const isConnecting = statusStage === "connecting";
+  const isLiveListening = statusStage === "listening";
+  const isTranscribing = statusStage === "transcribing";
 
   const handleMicClick = () => {
-    if (isListening) {
+    if (isListening || isConnecting || isLiveListening) {
       stopListening();
-    } else {
+    } else if (!isTranscribing && !isProcessing) {
       startListening();
     }
   };
@@ -203,52 +107,25 @@ export default function AskHero() {
       id="ask-hero-root"
       className="relative flex-1 w-full min-h-full bg-transparent flex flex-col items-center justify-start pt-[16px] pb-[20px] px-6 select-none"
     >
-      {/* Motion is deliberately small in amplitude and slow in tempo -- the
-          premium read comes from restraint, and from every state owning one
-          animation instead of stacking three. All of it is disabled outright
-          under prefers-reduced-motion. */}
+      {/* Dynamic Keyframe style for pulse animations */}
       <style>{`
-        @keyframes wave-idle {
-          0%   { transform: scaleY(0.74); }
-          100% { transform: scaleY(1.06); }
+        @keyframes pulse-waveform {
+          0% { transform: scaleY(0.5); }
+          100% { transform: scaleY(1.4); }
         }
-        @keyframes wave-live {
-          0%   { transform: scaleY(0.44); }
-          100% { transform: scaleY(1.30); }
+        @keyframes pulse-ring {
+          0% { transform: scale(0.96); opacity: 0.6; }
+          100% { transform: scale(1.05); opacity: 0.95; }
         }
-        @keyframes wave-scan {
-          0%, 68%, 100% { transform: scaleY(0.52); opacity: 0.4; }
-          32%           { transform: scaleY(1.12); opacity: 1; }
+        .animate-pulse-subtle {
+          animation: pulse-ring 2s ease-in-out infinite alternate;
         }
-        @keyframes mic-breathe {
-          0%, 100% { transform: scale(1);     opacity: 0.72; }
-          50%      { transform: scale(1.045); opacity: 1; }
-        }
-        @keyframes mic-halo-wait {
-          0%, 100% { opacity: 0.55; }
-          50%      { opacity: 0.9; }
-        }
-        .animate-mic-breathe { animation: mic-breathe 3.2s ease-in-out infinite; }
-        .animate-mic-wait    { animation: mic-halo-wait 1.6s ease-in-out infinite; }
-        @keyframes rise {
-          from { opacity: 0; transform: translateY(-3px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-        .animate-rise { animation: rise 0.26s cubic-bezier(0.16, 1, 0.3, 1) both; }
         .animate-fade-in {
           animation: fadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
         @keyframes fadeIn {
           from { opacity: 0; transform: translateY(-4px); }
           to { opacity: 1; transform: translateY(0); }
-        }
-        @media (prefers-reduced-motion: reduce) {
-          #ask-hero-root *,
-          #ask-hero-root *::before,
-          #ask-hero-root *::after {
-            animation: none !important;
-            transition-duration: 0.01ms !important;
-          }
         }
       `}</style>
 
@@ -302,50 +179,100 @@ export default function AskHero() {
 
         {/* Voice Interaction Card */}
         <div
-          className={`w-full max-w-[640px] h-auto min-h-[290px] lg:h-[345px] bg-[#FFFFFF] rounded-[20px] border flex flex-col items-center justify-between py-[22px] lg:py-[28px] px-4 sm:px-6 mt-[12px] z-20 ${theme.cardBorder}`}
-          style={{
-            boxShadow: theme.cardShadow,
-            transition: "border-color 500ms ease, box-shadow 500ms ease",
-          }}
+          className={`w-full max-w-[640px] h-auto min-h-[295px] lg:h-[350px] bg-[#FFFFFF] rounded-[22px] border transition-all duration-300 flex flex-col items-center justify-between py-[22px] lg:py-[28px] px-4 sm:px-6 mt-[12px] z-20 hover:shadow-xl ${
+            isConnecting
+              ? "border-orange-300 shadow-[0_12px_36px_rgba(249,115,22,0.15)] bg-gradient-to-b from-orange-50/20 to-white"
+              : isLiveListening
+                ? "border-emerald-400 shadow-[0_12px_36px_rgba(16,185,129,0.18)] bg-gradient-to-b from-emerald-50/20 to-white"
+                : isTranscribing
+                  ? "border-purple-300 shadow-[0_12px_36px_rgba(147,51,234,0.12)] bg-gradient-to-b from-purple-50/20 to-white"
+                  : "border-[#F0EFEA] shadow-[0_10px_30px_rgba(35,54,44,0.05)]"
+          }`}
         >
           {/* Card Top Title & Status Banner */}
-          <div className="flex flex-col items-center gap-1.5 text-center select-none w-full min-h-[46px] justify-center">
+          <div className="flex flex-col items-center gap-1.5 text-center select-none w-full min-h-[40px] justify-center">
             {isConnecting ? (
-              <StatusPill
-                theme={theme}
-                icon={<Loader2 className="w-[13px] h-[13px] animate-spin text-[#B7822F]" />}
-                hi="वॉइस इंजन कनेक्ट हो रहा है"
-                en="Connecting"
-              />
+              /* Small Cute Connecting Pill (Non-bold, Soft Peach) */
+              <div className="inline-flex items-center gap-2 px-3 py-1 bg-[#FEF6EB] border border-[#FCD8AC] rounded-full shadow-[0_1px_2px_rgba(217,119,6,0.04)] animate-pulse select-none">
+                {/* Small halo with delicate spinner */}
+                <div className="relative flex items-center justify-center w-[14px] h-[14px] rounded-full bg-[#FDE5C5] shrink-0">
+                  <Loader2 className="w-[9px] h-[9px] text-[#C2410C] animate-spin" />
+                </div>
+                <span className="font-sans text-[13px] font-normal text-[#8C2C07] leading-none tracking-[0px]">
+                  प्रतीक्षा करें
+                </span>
+                <span className="text-[#EA580C] text-[10px] font-normal select-none leading-none opacity-80">
+                  •
+                </span>
+                <span className="font-sans text-[12.5px] font-normal text-[#C2410C] leading-none">
+                  Connecting
+                </span>
+              </div>
             ) : isLiveListening ? (
-              <StatusPill
-                theme={theme}
-                icon={
-                  <span className="relative flex h-[9px] w-[9px]">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#16A46F] opacity-60" />
-                    <span className="relative inline-flex rounded-full h-[9px] w-[9px] bg-[#0E7A57]" />
-                  </span>
-                }
-                hi="अब बोलिए"
-                en="Listening"
-              />
+              /* Small Cute Green Listening Pill (Non-bold, Soft Mint, Matching Image) */
+              <div className="inline-flex items-center gap-2 px-3 py-1 bg-[#EBF5EF] border border-[#BCE1CC] rounded-full shadow-[0_1px_2px_rgba(15,118,85,0.04)] animate-fade-in select-none">
+                {/* Delicate circular halo with emerald dot */}
+                <div className="relative flex items-center justify-center w-[14px] h-[14px] rounded-full bg-[#CCEADB] shrink-0">
+                  <span className="w-[6.5px] h-[6.5px] rounded-full bg-[#0F7655] animate-pulse" />
+                </div>
+                <span className="font-sans text-[13px] font-normal text-[#125E42] leading-none tracking-[0px]">
+                  अब बोलिए
+                </span>
+                <span className="text-[#75A691] text-[10px] font-normal select-none leading-none opacity-80">
+                  •
+                </span>
+                <span className="font-sans text-[12.5px] font-normal text-[#4A7F69] leading-none">
+                  Listening
+                </span>
+              </div>
+            ) : isTranscribing ? (
+              /* Small Cute Finalizing Pill on Stop */
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-[#F5F3FF] border border-[#DDD6FE] rounded-full shadow-xs animate-pulse select-none">
+                <div className="relative flex items-center justify-center w-[14px] h-[14px] rounded-full bg-[#EDE9FE] shrink-0">
+                  <Loader2 className="w-[9px] h-[9px] text-[#7C3AED] animate-spin" />
+                </div>
+                <span className="font-sans text-[12.5px] font-normal text-[#5B21B6] leading-none">
+                  आवाज़ पहचानी जा रही है
+                </span>
+                <span className="text-[#8B5CF6] text-[10px] font-normal select-none leading-none opacity-80">
+                  •
+                </span>
+                <span className="font-sans text-[12px] font-normal text-[#7C3AED] leading-none">
+                  Finalizing
+                </span>
+              </div>
             ) : awaitingSend ? (
-              <StatusPill
-                theme={MIC_THEME.idle}
-                icon={<Sparkles className="w-[13px] h-[13px] text-[#176B4F]" />}
-                hi="प्रश्न देखें और भेजें"
-                en="Review & send"
-              />
+              /* Small Cute Teal Review Pill */
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-[#F0F9F6] border border-[#C5E8DC] rounded-full shadow-xs animate-fade-in select-none">
+                <Sparkles className="w-[11px] h-[11px] text-[#0D9488] shrink-0" />
+                <span className="font-sans text-[12.5px] font-normal text-[#115E59] leading-none">
+                  पहचाना गया प्रश्न देखें
+                </span>
+                <span className="text-[#5EEAD4] text-[10px] font-normal select-none leading-none opacity-80">
+                  •
+                </span>
+                <span className="font-sans text-[12px] font-normal text-[#0F766E] leading-none">
+                  Send when ready
+                </span>
+              </div>
             ) : isProcessing ? (
-              <StatusPill
-                theme={MIC_THEME.idle}
-                icon={<Loader2 className="w-[13px] h-[13px] animate-spin text-[#176B4F]" />}
-                hi="उत्तर तैयार किया जा रहा है"
-                en="Generating"
-              />
+              /* Small Cute Generating Pill */
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-[#F4F9F5] border border-[#CDE5D6] rounded-full shadow-xs animate-fade-in select-none">
+                <Loader2 className="w-[11px] h-[11px] animate-spin text-[#176B4F] shrink-0" />
+                <span className="font-sans text-[12.5px] font-normal text-[#14532D] leading-none">
+                  उत्तर तैयार किया जा रहा है
+                </span>
+                <span className="text-[#86EFAC] text-[10px] font-normal select-none leading-none opacity-80">
+                  •
+                </span>
+                <span className="font-sans text-[12px] font-normal text-[#15803D] leading-none">
+                  Generating
+                </span>
+              </div>
             ) : (
-              <div className="flex flex-col items-center animate-rise">
-                <h2 className="font-sans text-[18px] font-semibold text-[#176B4F] tracking-[-0.1px]">
+              /* Idle State */
+              <div className="flex flex-col items-center">
+                <h2 className="font-sans text-[18px] font-semibold text-[#176B4F]">
                   Tap to speak your question
                 </h2>
                 <span className="text-[12.5px] text-[#868D88] mt-0.5">
@@ -361,44 +288,65 @@ export default function AskHero() {
             {/* Left waveform illustration */}
             <AudioWaveform
               side="left"
-              isAnimating={isListening || isProcessing}
+              isAnimating={isListening || isProcessing || isTranscribing}
               statusStage={statusStage}
             />
 
             {/* Spherically layered microphone trigger */}
             <div className="relative flex items-center justify-center w-[104px] h-[104px] sm:w-[140px] sm:h-[140px] lg:w-[170px] lg:h-[170px] shrink-0">
 
-              {/* Outer halo. Breathes only while actually listening; during the
-                  connect wait it fades gently instead, so the spinner in the
-                  button stays the one thing carrying the "waiting" message. */}
+              {/* Outer light translucent ring */}
               <div
-                className={`absolute inset-0 rounded-full transition-colors duration-500 ${theme.halo} ${micState === "listening" ? "animate-mic-breathe"
-                  : micState === "connecting" ? "animate-mic-wait"
-                    : "opacity-70"
-                  }`}
+                className={`absolute inset-0 rounded-full transition-all duration-500 ${
+                  isConnecting
+                    ? "bg-[#FFEDD5] border border-orange-200 opacity-90 animate-pulse"
+                    : isLiveListening
+                      ? "bg-[#D1FAE5] border border-emerald-200 opacity-90 animate-pulse-subtle"
+                      : isTranscribing
+                        ? "bg-[#F3E8FF] border border-purple-200 opacity-90 animate-pulse"
+                        : "bg-[#F0F5F0] opacity-75"
+                }`}
               />
 
               {/* Middle ring */}
               <div
-                className={`absolute w-[86px] h-[86px] sm:w-[115px] sm:h-[115px] lg:w-[140px] lg:h-[140px] rounded-full flex items-center justify-center transition-colors duration-500 ${theme.ring}`}
+                className={`absolute w-[86px] h-[86px] sm:w-[115px] sm:h-[115px] lg:w-[140px] lg:h-[140px] rounded-full flex items-center justify-center transition-all duration-300 ${
+                  isConnecting
+                    ? "bg-[#FED7AA]"
+                    : isLiveListening
+                      ? "bg-[#A7F3D0]"
+                      : isTranscribing
+                        ? "bg-[#E9D5FF]"
+                        : "bg-[#DCEBE2]"
+                }`}
               >
 
                 {/* Inner button */}
                 <button
                   onClick={handleMicClick}
-                  aria-label={
-                    isLiveListening ? "Stop listening"
-                      : isConnecting ? "Connecting to the voice engine"
-                        : "Speak your question"
-                  }
-                  aria-busy={isConnecting}
-                  className={`w-[64px] h-[64px] sm:w-[85px] sm:h-[85px] lg:w-[102px] lg:h-[102px] rounded-full flex items-center justify-center text-white cursor-pointer transition-all duration-300 hover:scale-[1.035] active:scale-[0.97] border-none group relative focus:outline-none focus-visible:ring-4 focus-visible:ring-[#176B4F]/25 focus-visible:ring-offset-2 focus-visible:ring-offset-white ${theme.button}`}
-                  style={{ boxShadow: theme.buttonGlow }}
+                  aria-label="Speak your question"
+                  className={`w-[64px] h-[64px] sm:w-[85px] sm:h-[85px] lg:w-[102px] lg:h-[102px] rounded-full flex items-center justify-center text-white cursor-pointer transition-all duration-300 hover:scale-[1.03] active:scale-[0.97] outline-none border-none group relative shadow-lg ${
+                    isConnecting
+                      ? "bg-gradient-to-tr from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 shadow-orange-500/30"
+                      : isLiveListening
+                        ? "bg-gradient-to-tr from-emerald-600 to-teal-700 hover:from-emerald-700 hover:to-teal-800 shadow-emerald-600/30"
+                        : isTranscribing
+                          ? "bg-gradient-to-tr from-purple-600 to-indigo-700 shadow-purple-500/30"
+                          : "bg-[#176B4F] hover:bg-[#14694F] shadow-emerald-900/20"
+                  }`}
                 >
-                  {isConnecting ? (
+                  {isConnecting || isTranscribing ? (
                     <Loader2 className="w-[28px] h-[28px] sm:w-[36px] sm:h-[36px] lg:w-[44px] lg:h-[44px] animate-spin" />
                   ) : (
-                    <Mic className="w-[28px] h-[28px] sm:w-[36px] sm:h-[36px] lg:w-[44px] lg:h-[44px] stroke-[2] transition-transform duration-300 group-hover:scale-105" />
+                    <Mic className="w-[28px] h-[28px] sm:w-[36px] sm:h-[36px] lg:w-[44px] lg:h-[44px] stroke-[2] transition-transform duration-300 group-hover:rotate-2" />
+                  )}
+
+                  {/* Ping border animation when listening */}
+                  {isLiveListening && (
+                    <span className="absolute inset-0 rounded-full border-2 border-emerald-300 animate-ping opacity-75" />
+                  )}
+                  {isConnecting && (
+                    <span className="absolute inset-0 rounded-full border-2 border-orange-300 animate-ping opacity-60" />
                   )}
                 </button>
               </div>
@@ -407,7 +355,7 @@ export default function AskHero() {
             {/* Right waveform illustration */}
             <AudioWaveform
               side="right"
-              isAnimating={isListening || isProcessing}
+              isAnimating={isListening || isProcessing || isTranscribing}
               statusStage={statusStage}
             />
 
@@ -417,23 +365,21 @@ export default function AskHero() {
           <div className="relative z-20">
             <button
               onClick={() => setShowDropdown(!showDropdown)}
-              className="w-[205px] h-[44px] bg-[#FFFFFF] border border-[#DFDDD6] rounded-[22px] flex items-center justify-between px-[18px] cursor-pointer hover:border-[#176B4F] hover:bg-[#FAFBF8] transition-all duration-200 select-none focus:outline-none focus-visible:ring-4 focus-visible:ring-[#176B4F]/20"
+              className="w-[205px] h-[44px] bg-[#FFFFFF] border border-[#DADDD7] rounded-[22px] flex items-center justify-between px-[18px] cursor-pointer hover:border-[#176B4F] hover:bg-[#FAF9F5] transition-all duration-200 select-none outline-none shadow-xs"
             >
               <span className="font-sans text-[14px] md:text-[14.5px] font-normal text-[#1B211E]">
                 {selectedStrategy}
               </span>
               <ChevronDown
-                className={`w-[17px] h-[17px] stroke-[1.8] text-[#1C2520] transition-transform duration-200 ${showDropdown ? "rotate-180" : ""
-                  }`}
+                className={`w-[17px] h-[17px] stroke-[1.8] text-[#1C2520] transition-transform duration-200 ${
+                  showDropdown ? "rotate-180" : ""
+                }`}
               />
             </button>
 
             {/* Dropdown Options List */}
             {showDropdown && (
-              <div
-                className="absolute top-[50px] left-1/2 -translate-x-1/2 w-[240px] bg-white border border-[#E8E4DB] rounded-[14px] py-1.5 z-30 animate-fade-in"
-                style={{ boxShadow: "0 2px 4px rgba(35,54,44,0.04), 0 16px 36px rgba(35,54,44,0.11)" }}
-              >
+              <div className="absolute top-[50px] left-1/2 -translate-x-1/2 w-[210px] bg-white border border-[#E8E4DB] rounded-xl shadow-lg py-1 z-30 animate-fade-in">
                 {["Best Match", "Hierarchical (Parent-Child)", "Sliding Window (Overlap)"].map((mode) => (
                   <button
                     key={mode}
@@ -441,10 +387,11 @@ export default function AskHero() {
                       setSelectedStrategy(mode);
                       setShowDropdown(false);
                     }}
-                    className={`w-full text-left px-4 py-2.5 text-[13.5px] font-sans transition-colors focus:outline-none focus-visible:bg-[#F0F5F0] ${selectedStrategy === mode
-                      ? "text-[#176B4F] font-semibold bg-[#F1F6F0]"
-                      : "text-[#59635D] hover:bg-[#F6F8F4] hover:text-[#176B4F]"
-                      }`}
+                    className={`w-full text-left px-4 py-2.5 text-[14px] font-sans hover:bg-[#F0F5F0] hover:text-[#176B4F] transition-colors ${
+                      selectedStrategy === mode
+                        ? "text-[#176B4F] font-semibold bg-[#EDF3E8]"
+                        : "text-[#59635D]"
+                    }`}
                   >
                     {mode}
                   </button>

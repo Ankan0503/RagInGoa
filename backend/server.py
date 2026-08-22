@@ -953,6 +953,9 @@ class _LiveSTTSession:
         self._pending_audio: List[bytes] = []
 
     async def start(self) -> bool:
+        await self.abort()
+        self.text = ""
+        self._pending_audio.clear()
         self._connect_task = asyncio.create_task(self._connect())
         await self.websocket.send_json({"type": "status", "stage": "connecting"})
         return True
@@ -964,6 +967,11 @@ class _LiveSTTSession:
             logger.error(f"realtime STT unavailable: {e}")
             await self.websocket.send_json(
                 {"type": "error", "message": "वॉइस सेवा उपलब्ध नहीं है।"})
+            return
+        except Exception as e:
+            logger.error(f"STT connect failed: {e}")
+            await self.websocket.send_json(
+                {"type": "error", "message": f"वॉइस कनेक्शन त्रुटि: {e}"})
             return
         self.started_at = time.perf_counter()
         self.pump = asyncio.create_task(self._pump())
@@ -998,21 +1006,15 @@ class _LiveSTTSession:
     async def stop(self) -> float:
         """Close the STT side and return the elapsed listening time in ms."""
         if self._connect_task is not None and not self._connect_task.done():
-            # The mic was released before the handshake even finished. Wait
-            # briefly rather than tearing this down mid-connect, which would
-            # otherwise either leak the socket or race with _connect() still
-            # trying to set self.stt right as this clears it.
-            try:
-                await asyncio.wait_for(asyncio.shield(self._connect_task), timeout=3.0)
-            except Exception:
-                pass
+            self._connect_task.cancel()
+            self._connect_task = None
 
         elapsed = (time.perf_counter() - self.started_at) * 1000.0 if self.started_at else 0.0
         if self.stt is not None:
             await self.stt.signal_end()
-            # Give Sarvam a moment to flush the final transcript before closing.
+            # Give Sarvam a brief moment to flush the final transcript before closing.
             try:
-                await asyncio.wait_for(asyncio.shield(self.pump), timeout=2.0)
+                await asyncio.wait_for(asyncio.shield(self.pump), timeout=0.35)
             except Exception:
                 pass
             await self.stt.close()

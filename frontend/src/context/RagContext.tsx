@@ -179,11 +179,11 @@ export function RagProvider({ children }: { children: ReactNode }) {
   const wsRef = useRef<WebSocket | null>(null);
   const isStreamingRef = useRef(false);
   const sttLatencyRef = useRef<number | null>(null);
-  // handleServerMessage is set up once and would otherwise see a stale
-  // `query` from mount time -- this ref is the live value at send-time,
-  // for local-log entries written when "done"/"refused" arrive.
   const currentQueryRef = useRef<string>("");
   const currentTranscriptRef = useRef<string | null>(null);
+  const connectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const stopTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingTranscriptRef = useRef<string>("");
 
   // Live audio capture. MediaRecorder is gone: it produces webm/opus in
   // ~250ms containers, but Sarvam's realtime socket wants a continuous raw
@@ -194,18 +194,18 @@ export function RagProvider({ children }: { children: ReactNode }) {
 
   // Resolve WebSocket and REST Base URLs from .env or window.location
   const getWsUrl = (): string => {
-    const envUrl = (import.meta as any).env?.VITE_WS_URL;
-    if (envUrl) return envUrl;
+    let envUrl = (import.meta as any).env?.VITE_WS_URL;
+    if (envUrl) {
+      if (envUrl.includes(":3004")) {
+        envUrl = envUrl.replace(":3004", ":3005");
+      }
+      return envUrl;
+    }
     const isHttps = typeof window !== "undefined" && window.location.protocol === "https:";
     const protocol = isHttps ? "wss:" : "ws:";
     const host = (typeof window !== "undefined" && window.location.hostname) || "localhost";
-    const port = (typeof window !== "undefined" && window.location.port) || "";
-    const isDevPort = ["3000", "3001", "5173", "4173"].includes(port);
-    const targetPort = isDevPort ? ":8000" : (port ? `:${port}` : "");
-    return `${protocol}//${host}${targetPort}/ws/voice-rag`;
+    return `${protocol}//${host}:3005/ws/voice-rag`;
   };
-
-  const getApiBaseUrl = resolveApiBaseUrl;
 
   // Initialize and Maintain WebSocket Connection
   useEffect(() => {
@@ -223,28 +223,28 @@ export function RagProvider({ children }: { children: ReactNode }) {
           setError(null);
         };
 
-        socket.onclose = () => {
-          setIsConnected(false);
-          reconnectTimer = setTimeout(connect, 2500);
-        };
-
-        socket.onerror = () => {
-          setIsConnected(false);
-        };
-
         socket.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
             handleServerMessage(data);
-          } catch (e) {
-            console.error("WS Parse error:", e);
+          } catch (err) {
+            console.error("Failed to parse WebSocket JSON payload:", err);
           }
+        };
+
+        socket.onerror = (err) => {
+          console.error("WebSocket transport error:", err);
+        };
+
+        socket.onclose = () => {
+          setIsConnected(false);
+          reconnectTimer = setTimeout(connect, 2000);
         };
 
         wsRef.current = socket;
       } catch (err) {
         setIsConnected(false);
-        reconnectTimer = setTimeout(connect, 3000);
+        reconnectTimer = setTimeout(connect, 2000);
       }
     }
 
@@ -252,6 +252,8 @@ export function RagProvider({ children }: { children: ReactNode }) {
 
     return () => {
       clearTimeout(reconnectTimer);
+      if (connectTimerRef.current) clearTimeout(connectTimerRef.current);
+      if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
       if (wsRef.current) {
         wsRef.current.close();
       }
@@ -260,18 +262,29 @@ export function RagProvider({ children }: { children: ReactNode }) {
 
   function handleServerMessage(data: any) {
     if (data.type === "status") {
+      if (data.stage === "listening" && connectTimerRef.current) {
+        clearTimeout(connectTimerRef.current);
+        connectTimerRef.current = null;
+      }
       setStatusStage(data.stage as PipelineStage);
     } else if (data.type === "transcript.partial" || data.type === "transcript.final") {
       // Live feedback while the user is still speaking.
+      pendingTranscriptRef.current = data.text || "";
       setPendingTranscript(data.text || "");
     } else if (data.type === "transcript.done") {
       // Speech ended. Hold the transcript for review -- nothing is retrieved
       // or generated until the user presses Send.
-      setPendingTranscript(data.text || "");
-      setAwaitingSend(Boolean(data.text));
+      if (stopTimerRef.current) {
+        clearTimeout(stopTimerRef.current);
+        stopTimerRef.current = null;
+      }
+      const finalTxt = data.text || pendingTranscriptRef.current || "";
+      pendingTranscriptRef.current = finalTxt;
+      setPendingTranscript(finalTxt);
+      setAwaitingSend(Boolean(finalTxt.trim()));
       sttLatencyRef.current = data.stt_latency_ms ?? null;
       setStatusStage("idle");
-      if (!data.text) {
+      if (!finalTxt.trim()) {
         setError("आवाज़ पहचानी नहीं जा सकी। कृपया दोबारा बोलें।");
       }
     } else if (data.type === "transcript") {
@@ -413,7 +426,9 @@ export function RagProvider({ children }: { children: ReactNode }) {
   const startListening = async () => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      setError("Backend WebSocket is not connected.");
+      setError("वॉइस बैकएंड से कनेक्शन स्थापित नहीं हो सका (Port 3005)। कृपया पेज रीफ्रेश करें।");
+      setIsListening(false);
+      setStatusStage("idle");
       return;
     }
 
@@ -431,6 +446,7 @@ export function RagProvider({ children }: { children: ReactNode }) {
       setPendingTranscript("");
       setAwaitingSend(false);
       setAnswer("");
+      setIsListening(true);
       setStatusStage("connecting");
 
       // Sent first, before getUserMedia, so the server's Sarvam handshake
@@ -479,23 +495,62 @@ export function RagProvider({ children }: { children: ReactNode }) {
       // would show "listening" before the server can actually hear anything.
       mark("audio graph wired, setIsListening(true) now");
       setIsListening(true);
+
+      if (connectTimerRef.current) clearTimeout(connectTimerRef.current);
+      connectTimerRef.current = setTimeout(() => {
+        setStatusStage((curr) => {
+          if (curr === "connecting") {
+            setIsListening(false);
+            teardownAudio();
+            setError("वॉइस सर्वर कनेक्ट होने में समय लग रहा है। कृपया पुनः प्रयास करें।");
+            return "idle";
+          }
+          return curr;
+        });
+      }, 5000);
     } catch (err: any) {
       console.error("Microphone error:", err);
       setError("Microphone permission denied or device not found.");
       setIsListening(false);
+      setStatusStage("idle");
       teardownAudio();
     }
   };
 
   const stopListening = () => {
-    if (!isListening) return;
+    if (connectTimerRef.current) {
+      clearTimeout(connectTimerRef.current);
+      connectTimerRef.current = null;
+    }
     teardownAudio();
     setIsListening(false);
     setStatusStage("transcribing");
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "stt_stop" }));
+    } else {
+      setStatusStage("idle");
+      const captured = pendingTranscriptRef.current.trim();
+      if (captured) {
+        setAwaitingSend(true);
+      }
+      return;
     }
+
+    if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+    // 700ms safety timeout: If server didn't send transcript.done in 700ms, unlock UI immediately!
+    stopTimerRef.current = setTimeout(() => {
+      setStatusStage((curr) => {
+        if (curr === "transcribing" || curr === "connecting") {
+          return "idle";
+        }
+        return curr;
+      });
+      const captured = pendingTranscriptRef.current.trim();
+      if (captured) {
+        setAwaitingSend(true);
+      }
+    }, 700);
   };
 
   /** Commit the reviewed transcript. This is the Send button. */
