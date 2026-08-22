@@ -121,7 +121,21 @@ services:
       QDRANT_API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
       QDRANT_PREFER_GRPC: "true"
       QDRANT_TIMEOUT_S: "10"
-      HNSW_EF: "128"
+      # Retrieval tuning. HNSW_EF was hardcoded, so tuning it needed a commit
+      # and redeploy; all of these are substituted from the environment now so
+      # they can be A/B'd from the Dokploy env panel against benchmark.py's
+      # answer_recall_mean without another deploy.
+      #
+      # HNSW_EF drops 128 -> 64: fewer graph nodes visited per query, which is
+      # where the cost actually is (retrieval is memory-latency bound on this
+      # box, not disk or CPU-bound). RECALL IMPACT IS NOT YET MEASURED -- set
+      # HNSW_EF=128 in the env panel to revert instantly if recall regresses.
+      # Every other default below is the previously deployed behaviour.
+      HNSW_EF: ${HNSW_EF:-64}
+      CANDIDATE_LIMIT: ${CANDIDATE_LIMIT:-24}
+      SPARSE_MODE: ${SPARSE_MODE:-on}
+      SPARSE_SKIP_SCORE: ${SPARSE_SKIP_SCORE:-0.90}
+      QUANT_RESCORE: ${QUANT_RESCORE:-true}
 
       PORT: "3004"
       PYTHONUNBUFFERED: "1"

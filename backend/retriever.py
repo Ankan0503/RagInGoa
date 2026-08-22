@@ -250,6 +250,32 @@ class IndicRetriever:
 
         self.hnsw_ef = int(os.getenv("HNSW_EF", "128"))
 
+        # Retrieval cost knobs, all env-tunable so they can be A/B'd against
+        # benchmark.py's answer_recall_mean without a redeploy.
+        #
+        # Measured on this deployment (3.43M vectors, 2 vCPU, cold cache --
+        # i.e. a different query vector each time, which is what production
+        # actually does):
+        #     search_dense   ~40ms
+        #     search_sparse  ~104ms   <- 2.6x dense, the dominant cost
+        # Warm/repeated vectors measure ~9ms, so any benchmark that reuses one
+        # vector will badly understate all of this.
+        self.candidate_limit = int(os.getenv("CANDIDATE_LIMIT", "24"))
+
+        # on   -- always run BM25 (default; unchanged behaviour)
+        # off  -- never run it; dense-only retrieval
+        # auto -- skip it when dense retrieval is already confident, paying
+        #         the ~104ms only for queries that actually need lexical
+        #         matching (rare terms, proper nouns, numbers).
+        self.sparse_mode = (os.getenv("SPARSE_MODE", "on") or "on").lower().strip()
+        self.sparse_skip_score = float(os.getenv("SPARSE_SKIP_SCORE", "0.90"))
+
+        # Qdrant re-reads the original fp32 vectors from disk to rescore
+        # quantized results. Measured: median 6.6ms -> 6.1ms, but the tail
+        # collapses from 77.5ms to 6.4ms, so disabling it mainly buys
+        # consistency. Costs a little ranking accuracy (int8 scores).
+        self.quant_rescore = (os.getenv("QUANT_RESCORE", "true").lower() != "false")
+
         expected = (self.manifest or {}).get("transport")
         if expected and expected != self.transport:
             raise IndexUnavailableError(
@@ -425,9 +451,14 @@ class IndicRetriever:
                 match=self._models.MatchValue(value=query_type.upper())))
         qfilter = self._models.Filter(must=conditions) if conditions else None
 
-        limit = max(top_k * self.OVERFETCH, 24)
-        search_params = (self._models.SearchParams(hnsw_ef=self.hnsw_ef)
-                         if self.transport == "server" else None)
+        limit = max(top_k * self.OVERFETCH, self.candidate_limit)
+        search_params = None
+        if self.transport == "server":
+            search_params = self._models.SearchParams(
+                hnsw_ef=self.hnsw_ef,
+                quantization=self._models.QuantizationSearchParams(
+                    rescore=self.quant_rescore),
+            )
 
         t0 = time.perf_counter()
         try:
@@ -445,7 +476,26 @@ class IndicRetriever:
                 st.detail = f"{len(dense_points)} chunks"
 
             sparse_points = []
-            if self.sparse_vector_name and self.bm25 is not None:
+            run_sparse = (self.sparse_vector_name is not None
+                          and self.bm25 is not None
+                          and self.sparse_mode != "off")
+            skip_reason = ""
+            if run_sparse and self.sparse_mode == "auto" and dense_points:
+                # Dense already found something it is confident about, so the
+                # ~104ms lexical scan is unlikely to change the answer. Uses
+                # the dense cosine directly (not the fused score, which does
+                # not exist yet at this point).
+                if dense_points[0].score >= self.sparse_skip_score:
+                    run_sparse = False
+                    skip_reason = f"skipped: dense {dense_points[0].score:.3f} >= {self.sparse_skip_score}"
+
+            if not run_sparse:
+                # Still emit the stage so the Insights breakdown shows why it
+                # was not run, rather than the row silently disappearing.
+                with prof.stage("search_sparse") as st:
+                    st.detail = skip_reason or f"skipped: SPARSE_MODE={self.sparse_mode}"
+
+            if run_sparse:
                 with prof.stage("bm25_encode"):
                     sv = list(self.bm25.embed([clean]))[0]
                 if len(sv.indices):

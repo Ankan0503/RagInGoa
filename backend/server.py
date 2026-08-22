@@ -61,7 +61,18 @@ class Limits:
     MIN_SCORE_MARGIN    = float(os.getenv("MIN_SCORE_MARGIN", "0.0"))
     MIN_GROUNDING       = float(os.getenv("MIN_GROUNDING_OVERLAP", "0.45"))
     MAX_QUERY_CHARS     = int(os.getenv("MAX_QUERY_CHARS", "512"))
-    MAX_TOKENS          = int(os.getenv("MAX_TOKENS", "48"))
+    # 128, not 48. Every chat model Groq still serves is a reasoning model,
+    # and their hidden reasoning tokens are drawn from this same budget before
+    # a single visible character is emitted. Measured on the real prompt
+    # (system template + 3-passage context): reasoning alone takes 14-57
+    # tokens, and total completions peak at 95. At 48 the budget was exhausted
+    # by reasoning every time -- finish_reason="length" with content="" -- so
+    # the answer was ALWAYS empty and the user saw the generation-failed
+    # fallback. This is a cap, not a target: measured across 5 questions at
+    # 96/128/160, every one stopped on its own at <=95 tokens with identical
+    # text and no truncation, so raising it does not make short answers
+    # slower. 128 clears the observed 95-token peak with headroom.
+    MAX_TOKENS          = int(os.getenv("MAX_TOKENS", "128"))
 
 
 class TextQueryRequest(BaseModel):

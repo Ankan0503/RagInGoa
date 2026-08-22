@@ -176,12 +176,13 @@ class GroqLLM(BaseLLM):
         }
         # gpt-oss models on Groq are reasoning models: hidden reasoning
         # tokens are drawn from the same max_tokens budget as the visible
-        # answer. Left unset, Groq's default reasoning effort can consume
-        # the entire (deliberately small, latency-budgeted) max_tokens
-        # before any content is emitted, yielding finish_reason="length"
-        # with zero content -- observed live on openai/gpt-oss-20b. "low"
-        # keeps reasoning minimal so the small token budget goes to the
-        # actual answer. Other Groq models ignore the unknown field.
+        # answer, so a budget that is too small is spent entirely on
+        # reasoning and returns finish_reason="length" with content="".
+        # NOTE: "low" is NOT the fix for that -- measured on the real
+        # prompt, reasoning cost 45-46 tokens with this set and 46 without,
+        # i.e. no meaningful difference. The actual fix is a large enough
+        # Limits.MAX_TOKENS (see server.py). This is kept only because it
+        # trends reasoning shorter at no cost; do not rely on it alone.
         if "gpt-oss" in self.model:
             body["reasoning_effort"] = "low"
         return body
