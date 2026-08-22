@@ -260,7 +260,11 @@ class IndicRetriever:
         #     search_sparse  ~104ms   <- 2.6x dense, the dominant cost
         # Warm/repeated vectors measure ~9ms, so any benchmark that reuses one
         # vector will badly understate all of this.
-        self.candidate_limit = int(os.getenv("CANDIDATE_LIMIT", "24"))
+        # 0 = use the original top_k*OVERFETCH heuristic (24 at top_k=3).
+        # A positive value overrides it outright: CANDIDATE_LIMIT=16 measured
+        # P50 88.84ms earlier in this deployment's history with recall
+        # unaffected, but that was only ever a live edit and was never kept.
+        self.candidate_limit = int(os.getenv("CANDIDATE_LIMIT", "0"))
 
         # on   -- always run BM25 (default; unchanged behaviour)
         # off  -- never run it; dense-only retrieval
@@ -451,7 +455,13 @@ class IndicRetriever:
                 match=self._models.MatchValue(value=query_type.upper())))
         qfilter = self._models.Filter(must=conditions) if conditions else None
 
-        limit = max(top_k * self.OVERFETCH, self.candidate_limit)
+        # CANDIDATE_LIMIT=0 keeps the original top_k*OVERFETCH heuristic; any
+        # positive value is the exact candidate count. It deliberately is NOT
+        # max()'d against the heuristic -- written that way it was a silent
+        # no-op, since top_k=3 * OVERFETCH=8 already equals the old floor of
+        # 24, so max(24, 16) stayed 24 and lowering the knob changed nothing.
+        limit = (max(top_k, self.candidate_limit) if self.candidate_limit > 0
+                 else max(top_k * self.OVERFETCH, 24))
         search_params = None
         if self.transport == "server":
             search_params = self._models.SearchParams(

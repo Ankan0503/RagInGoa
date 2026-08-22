@@ -126,13 +126,17 @@ services:
       # they can be A/B'd from the Dokploy env panel against benchmark.py's
       # answer_recall_mean without another deploy.
       #
-      # HNSW_EF drops 128 -> 64: fewer graph nodes visited per query, which is
-      # where the cost actually is (retrieval is memory-latency bound on this
-      # box, not disk or CPU-bound). RECALL IMPACT IS NOT YET MEASURED -- set
-      # HNSW_EF=128 in the env panel to revert instantly if recall regresses.
-      # Every other default below is the previously deployed behaviour.
+      # HNSW_EF=64 was tried on the theory that visiting fewer graph nodes
+      # would cut the memory-latency cost that dominates retrieval here. It
+      # did NOT: measured over 30 queries, ef=128 came out at 207ms mean and
+      # ef=64 at 220ms, i.e. no better and possibly slightly worse. Its recall
+      # cost is still unmeasured, because the benchmark was sampling a
+      # different query set every run at the time (fixed alongside this).
+      # The deployment therefore sets HNSW_EF=128 in the env panel; this
+      # default is left at 64 only so the value stays overridable rather than
+      # hardcoded. Prefer 128 until someone measures otherwise.
       HNSW_EF: ${HNSW_EF:-64}
-      CANDIDATE_LIMIT: ${CANDIDATE_LIMIT:-24}
+      CANDIDATE_LIMIT: ${CANDIDATE_LIMIT:-0}
       SPARSE_MODE: ${SPARSE_MODE:-on}
       SPARSE_SKIP_SCORE: ${SPARSE_SKIP_SCORE:-0.90}
       QUANT_RESCORE: ${QUANT_RESCORE:-true}

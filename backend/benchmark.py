@@ -82,17 +82,28 @@ def load_dataset_queries(n: int, seed: int = 42,
     if os.path.exists(db):
         conn = sqlite3.connect(db)
         conn.row_factory = sqlite3.Row
+        # Deterministic sample. This used to be "ORDER BY RANDOM() LIMIT ?",
+        # which SQLite seeds itself -- Python's random.seed()/--seed had no
+        # effect on it, so every run scored a DIFFERENT set of queries while
+        # appearing reproducible. Two runs of one identical config measured
+        # recall 0.264 and 0.365 purely from that, which is wider than most
+        # config differences worth detecting and made A/B comparison useless.
+        # Ordering by a stable key and sampling in Python under the seed makes
+        # a given --seed/-n pair select the same queries every time.
         rows = conn.execute(
             "SELECT DISTINCT query, gold_answer, query_type FROM parents "
             "WHERE query IS NOT NULL AND length(query) > 8 "
             "AND gold_answer IS NOT NULL AND length(gold_answer) > 8 "
-            "ORDER BY RANDOM() LIMIT ?", (n,)
+            "ORDER BY query"
         ).fetchall()
         conn.close()
         if rows:
-            print(f"Loaded {len(rows)} queries from parents.sqlite")
+            picked = (list(rows) if len(rows) <= n
+                      else random.Random(seed).sample(list(rows), n))
+            print(f"Loaded {len(picked)} queries from parents.sqlite "
+                  f"(seed={seed}, deterministic)")
             return [{"query": r["query"], "gold": r["gold_answer"],
-                     "type": r["query_type"] or "UNKNOWN"} for r in rows]
+                     "type": r["query_type"] or "UNKNOWN"} for r in picked]
 
     if not allow_download:
         sys.exit(
