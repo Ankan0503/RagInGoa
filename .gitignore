@@ -38,6 +38,11 @@ calib.json
 gates.json
 results.json
 
+# --- agent / editor tooling ---
+# Local dev-server launch config used for previewing the frontend. Tooling
+# state for whoever is at the keyboard, not project configuration.
+.claude/
+
 # --- local working notes ---
 # Operational handoff notes: live env values, measurements, open defects.
 # Deliberately never committed -- this is a scratch record for whoever is at

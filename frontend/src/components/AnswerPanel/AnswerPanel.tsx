@@ -14,6 +14,41 @@ interface Source {
   id: string;
   passage: string;
   score: string;
+  strategy: string;
+  matched: string[];
+}
+
+/**
+ * How each chunking strategy is presented, and what it actually is.
+ *
+ * These come straight off the hit the retriever already returned -- showing
+ * them costs no extra search and no extra millisecond. It replaces the
+ * strategy dropdown as the way the chunking work is demonstrated, because the
+ * dropdown filters the search to one chunk type and most passages are not
+ * chunked every way: only 4.2% of passages have `window` chunks at all, so
+ * picking it makes the system refuse questions it can otherwise answer.
+ * Reporting which strategy won per result shows the same work at full recall.
+ */
+const STRATEGY_INFO: Record<string, { label: string; detail: string }> = {
+  passage:  { label: "passage",
+              detail: "S1 · whole passage as one vector — every passage has one" },
+  sentence: { label: "sentence",
+              detail: "S2 · one vector per sentence — passages of 3–6 sentences" },
+  window:   { label: "window",
+              detail: "S3 · 3-sentence sliding window, 1 overlapping — passages of 7+ sentences" },
+  semantic: { label: "semantic",
+              detail: "S4 · sentences grouped by topic shift — passages of 7+ sentences" },
+};
+
+function strategyTooltip(strategy: string, matched: string[]): string {
+  const info = STRATEGY_INFO[strategy];
+  const lines = [`Best match came from the ${info?.label ?? strategy} chunking.`];
+  if (info) lines.push(info.detail);
+  const others = matched.filter((m) => m !== strategy);
+  if (others.length > 0) {
+    lines.push("", `Also matched under: ${others.join(", ")}`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -32,13 +67,31 @@ function SourceRow({ source }: { source: Source }) {
         {/* Passage Title */}
         <span
           title={source.passage}
-          className="font-sans font-normal text-[14px] text-[#252B27] group-hover:text-[#176B4F] transition-colors duration-150 truncate max-w-[180px]"
+          className="font-sans font-normal text-[14px] text-[#252B27] group-hover:text-[#176B4F] transition-colors duration-150 truncate max-w-[132px]"
         >
           {source.passage}
         </span>
+        {/* Which chunking strategy actually produced this hit. Read off the
+            result that was already returned -- no second retrieval. */}
+        {source.strategy && (
+          <span
+            title={strategyTooltip(source.strategy, source.matched)}
+            className="shrink-0 inline-flex items-center gap-1 rounded-full border border-[#DDE5DA] bg-[#F0F4EF] px-2 py-[1px] font-sans font-medium text-[10.5px] leading-[16px] text-[#176B4F]"
+          >
+            {STRATEGY_INFO[source.strategy]?.label ?? source.strategy}
+            {source.matched.length > 1 && (
+              <span
+                className="font-semibold text-[#4C8F73]"
+                title={`Also matched under ${source.matched.length - 1} other chunking(s)`}
+              >
+                +{source.matched.length - 1}
+              </span>
+            )}
+          </span>
+        )}
       </div>
       {/* Passage Relevance Score */}
-      <span className="font-sans font-normal text-[11.5px] text-[#727873] pr-1">
+      <span className="font-sans font-normal text-[11.5px] text-[#727873] pr-1 shrink-0">
         Score: {source.score}
       </span>
     </div>
@@ -75,10 +128,15 @@ export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () =>
   const displaySources: Source[] = sources.slice(0, 3).map((s, idx) => {
     const text = (s.child_text || s.parent_text || "").trim();
     const snippet = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+    // Recomputed from this response's own hits every time, so it always
+    // describes the query on screen rather than a cached or assumed value.
+    const matched = Array.isArray(s.strategies_matched) ? s.strategies_matched : [];
     return {
       id: String(idx + 1).padStart(2, "0"),
       passage: snippet || `Passage #${s.parent_id || idx + 1}`,
       score: typeof s.score === "number" ? s.score.toFixed(2) : "—",
+      strategy: s.strategy || "",
+      matched,
     };
   });
 
@@ -135,19 +193,29 @@ export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () =>
             used to live in AskHero above the Best Match dropdown, where its
             appearing/disappearing height pushed that dropdown up and down.
             It belongs next to "You asked" anyway, so it moved here instead. */}
-        {(pendingTranscript || awaitingSend) ? (
+        {(pendingTranscript || awaitingSend || isListening) ? (
           <div className="mt-[14px]">
             <div className="flex items-center gap-2 mb-1.5">
-              <span className="font-sans text-[11px] font-medium text-[#176B4F] uppercase tracking-wide">
-                {isListening ? "Hearing" : "You said"}
+              <span className={`font-sans text-[11px] font-semibold uppercase tracking-wide ${
+                statusStage === "connecting" ? "text-amber-700" : "text-[#176B4F]"
+              }`}>
+                {isListening
+                  ? (statusStage === "connecting" ? "Connecting Voice" : "Hearing Live")
+                  : "You said"}
               </span>
               {isListening && (
-                <span className="w-[6px] h-[6px] rounded-full bg-[#E55353] animate-pulse" />
+                <span className={`w-[7px] h-[7px] rounded-full ${
+                  statusStage === "connecting" ? "bg-amber-500 animate-spin" : "bg-[#E55353] animate-pulse"
+                }`} />
               )}
             </div>
             <p className="font-sans text-[14.5px] text-[#1B211E] leading-[1.5] bg-[#F7F9F6] border border-[#E4EAE2] rounded-[10px] px-3 py-2 min-h-[40px] break-words">
               {pendingTranscript || (
-                <span className="text-[#9AA39D]">सुन रहे हैं…</span>
+                statusStage === "connecting" ? (
+                  <span className="text-amber-700 font-medium animate-pulse">⏳ कनेक्ट हो रहा है... कृपया 1 सेकंड प्रतीक्षा करें</span>
+                ) : (
+                  <span className="text-emerald-700 font-medium">🎙️ सुन रहे हैं… कृपया बोलिए (Listening...)</span>
+                )
               )}
             </p>
 
@@ -245,6 +313,14 @@ export default function AnswerPanel({ onOpenInsights }: { onOpenInsights?: () =>
             (Top 3)
           </span>
         </div>
+
+        {/* Legend for the strategy tags. Only shown once there is something
+            tagged, so an empty panel stays quiet. */}
+        {displaySources.length > 0 && (
+          <p className="font-sans text-[11.5px] text-[#8A928D] leading-[1.5] -mt-[4px] mb-[8px]">
+            Tagged with the chunking strategy that matched — hover for detail.
+          </p>
+        )}
 
         {/* Map Source Rows with light dividers in between, or an honest
             empty state -- no fabricated passage IDs when nothing has been

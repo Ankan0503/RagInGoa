@@ -73,7 +73,7 @@ function fmtTime(iso: string): string {
   }
 }
 
-function StatTile({ label, value }: { label: string; value: string }) {
+function StatTile({ label, value }: { label: string; value: string; key?: React.Key }) {
   return (
     <div className="flex-1 min-w-[110px] rounded-[12px] bg-[#F7F9F6] border border-[#E6EAE3] px-3.5 py-2.5 flex flex-col gap-0.5">
       <span className="font-sans text-[17px] font-semibold text-[#176B4F] leading-none">
@@ -86,7 +86,7 @@ function StatTile({ label, value }: { label: string; value: string }) {
   );
 }
 
-function StageRow({ stage }: { stage: StageTiming }) {
+function StageRow({ stage }: { stage: StageTiming; key?: React.Key }) {
   const isRetrieval = RETRIEVAL_STAGE_NAMES.has(stage.stage);
   return (
     <div className="flex items-center justify-between py-1.5 px-3 rounded-[6px] hover:bg-[#F7F9F6]">
@@ -106,7 +106,7 @@ function StageRow({ stage }: { stage: StageTiming }) {
   );
 }
 
-function EntryRow({ entry }: { entry: QueryLogEntry }) {
+function EntryRow({ entry }: { entry: QueryLogEntry; key?: React.Key }) {
   const [expanded, setExpanded] = useState(false);
   const displayQuestion = entry.transcript || entry.query;
 

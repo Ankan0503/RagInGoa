@@ -77,6 +77,11 @@ export function clearLocalLog(): void {
 export interface SourceHit {
   score: number;
   strategy: string;
+  // Every chunking strategy whose chunks matched this passage. A passage that
+  // surfaced under more than one is one that RRF fusion promoted for agreeing
+  // with itself across chunkings -- which is the entire point of indexing it
+  // several ways, and was previously arriving here and being discarded.
+  strategies_matched?: string[];
   child_text?: string;
   parent_id: string;
   parent_text: string;

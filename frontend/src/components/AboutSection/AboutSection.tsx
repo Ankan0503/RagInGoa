@@ -101,7 +101,7 @@ const CAPABILITIES: Capability[] = [
   },
 ];
 
-function TeamCard({ member }: { member: TeamMember }) {
+function TeamCard({ member }: { member: TeamMember; key?: React.Key }) {
   return (
     <div className="flex items-center justify-between rounded-[12px] border border-[#E8E4DB] bg-[#FEFEFC] px-4 py-3">
       <span className="font-sans font-semibold text-[14.5px] text-[#151A17]">

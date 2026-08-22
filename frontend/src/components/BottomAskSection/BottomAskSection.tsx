@@ -9,7 +9,11 @@ const capabilities = [
     icon: Zap,
     iconStroke: 2.0,
     title: "< 200ms",
-    subtitle: "End-to-end target",
+    // "End-to-end target" was not true and the project's own benchmark said so:
+    // end-to-end P50 is 665-690ms, because generation is a network round trip
+    // to a hosted LLM. Retrieval is the stage this figure describes, and it
+    // genuinely holds -- 92ms P50 / 164ms P100 over 3.43M vectors.
+    subtitle: "Retrieval latency",
   },
   {
     icon: ShieldCheck,

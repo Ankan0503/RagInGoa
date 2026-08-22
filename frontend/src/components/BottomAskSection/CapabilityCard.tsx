@@ -2,6 +2,7 @@ import React from "react";
 import { LucideIcon } from "lucide-react";
 
 interface CapabilityCardProps {
+  key?: React.Key;
   icon: LucideIcon;
   iconStroke?: number;
   title: string;
