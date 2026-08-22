@@ -97,7 +97,7 @@ export default function AskHero() {
   const handleMicClick = () => {
     if (isListening || isConnecting || isLiveListening) {
       stopListening();
-    } else if (!isTranscribing && !isProcessing) {
+    } else {
       startListening();
     }
   };

@@ -194,17 +194,22 @@ export function RagProvider({ children }: { children: ReactNode }) {
 
   // Resolve WebSocket and REST Base URLs from .env or window.location
   const getWsUrl = (): string => {
-    let envUrl = (import.meta as any).env?.VITE_WS_URL;
-    if (envUrl) {
-      if (envUrl.includes(":3004")) {
-        envUrl = envUrl.replace(":3004", ":3005");
-      }
-      return envUrl;
-    }
+    const envUrl = (import.meta as any).env?.VITE_WS_URL;
+    if (envUrl) return envUrl;
+
     const isHttps = typeof window !== "undefined" && window.location.protocol === "https:";
     const protocol = isHttps ? "wss:" : "ws:";
     const host = (typeof window !== "undefined" && window.location.hostname) || "localhost";
-    return `${protocol}//${host}:3005/ws/voice-rag`;
+    const port = (typeof window !== "undefined" && window.location.port) || "";
+    const isDevPort = ["3000", "3001", "5173", "4173"].includes(port);
+
+    // In local dev on port 3000, connect to backend on 3005.
+    // In production deployment, connect directly to window.location.host on the same domain/port.
+    if (isDevPort) {
+      return `${protocol}//${host}:3005/ws/voice-rag`;
+    }
+    const hostWithPort = (typeof window !== "undefined" && window.location.host) || "localhost";
+    return `${protocol}//${hostWithPort}/ws/voice-rag`;
   };
 
   // Initialize and Maintain WebSocket Connection
