@@ -35,7 +35,21 @@ compare.json
 groq.json
 sarvam.json
 calib.json
+gates.json
 results.json
+
+# --- local working notes ---
+# Operational handoff notes: live env values, measurements, open defects.
+# Deliberately never committed -- this is a scratch record for whoever is at
+# the keyboard, not part of the project.
+NOTES.md
+
+# --- locally generated query sets ---
+# Sampled/curated MSMARCO-XI queries used for ad-hoc evaluation. Regenerated
+# from parents.sqlite when needed, so they are working data rather than
+# project inputs.
+backend/sampled_50_queries.json
+backend/curated_50_questions.json
 
 # local voice recordings used with backend/probe_realtime_stt.py
 *.wav

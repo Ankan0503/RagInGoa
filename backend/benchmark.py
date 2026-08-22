@@ -178,7 +178,8 @@ def summarize(name: str, values: List[float]) -> Dict[str, float]:
 
 def run_local(queries: List[Dict[str, str]], top_k: int) -> Dict[str, Any]:
     from retriever import IndicRetriever, RetrieverError
-    from guardrails import GuardrailPipeline
+    from guardrails import (GuardrailPipeline, parse_strategy_deltas,
+                            DEFAULT_STRATEGY_DELTAS)
     from profiling import Profiler, ProfileAggregator, DEFAULT_BUDGET_MS
 
     print("\nInitialising retriever (local mode)...")
@@ -188,8 +189,16 @@ def run_local(queries: List[Dict[str, str]], top_k: int) -> Dict[str, Any]:
         print(f"\nFAILED: {e}\n")
         sys.exit(1)
 
+    # Built from the same environment the server reads, so a benchmark run
+    # measures the gate that is actually deployed. Constructing it with only
+    # min_retrieval_score would quietly disable the per-strategy floors and the
+    # BM25 rescue here, and the refusal rate this reports would then describe a
+    # gate nothing is running.
     guards = GuardrailPipeline(
-        min_retrieval_score=float(os.getenv("MIN_RETRIEVAL_SCORE", "0.80")))
+        min_retrieval_score=float(os.getenv("MIN_RETRIEVAL_SCORE", "0.80")),
+        strategy_deltas=parse_strategy_deltas(
+            os.getenv("STRATEGY_FLOOR_DELTA", DEFAULT_STRATEGY_DELTAS)),
+        sparse_rescue_delta=float(os.getenv("SPARSE_RESCUE_DELTA", "0.02")))
 
     agg = ProfileAggregator(budget_ms=DEFAULT_BUDGET_MS)
     stages: Dict[str, List[float]] = {
@@ -215,7 +224,10 @@ def run_local(queries: List[Dict[str, str]], top_k: int) -> Dict[str, Any]:
         res = r.retrieve(q, top_k=top_k, profiler=prof)
 
         with prof.stage("guard_retrieval"):
-            v_ret = guards.check_retrieval([h.raw_score for h in res.hits])
+            v_ret = guards.check_retrieval(
+                [h.raw_score for h in res.hits],
+                strategy=res.strategy_filter,
+                lexical_agreement=res.lexical_agreement)
         g_ms += v_ret.latency_ms
         prof.close()
         agg.add(prof)
@@ -253,7 +265,10 @@ def run_local(queries: List[Dict[str, str]], top_k: int) -> Dict[str, Any]:
         got_family, reason = "input", (v.reason.value if v.reason else None)
         if v.allowed:
             res = r.retrieve(q, top_k=top_k)
-            v = guards.check_retrieval([h.raw_score for h in res.hits])
+            v = guards.check_retrieval(
+                [h.raw_score for h in res.hits],
+                strategy=res.strategy_filter,
+                lexical_agreement=res.lexical_agreement)
             got_family, reason = "retrieval", (v.reason.value if v.reason else None)
         was_refused = not v.allowed
         refused += was_refused

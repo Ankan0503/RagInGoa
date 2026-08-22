@@ -38,7 +38,8 @@ from retriever import (
 )
 from audio_stt import SarvamSTTClient
 from stt_realtime import SarvamRealtimeSTT, STTRealtimeError
-from guardrails import GuardrailPipeline, Verdict, RefusalReason
+from guardrails import (GuardrailPipeline, Verdict, RefusalReason,
+                        parse_strategy_deltas, DEFAULT_STRATEGY_DELTAS)
 from profiling import Profiler, DEFAULT_BUDGET_MS
 from llm import build_llm, BaseLLM, LLMError, available_providers
 from query_log import QueryLog, QueryLogEntry
@@ -60,6 +61,32 @@ class Limits:
     MIN_RETRIEVAL_SCORE = float(os.getenv("MIN_RETRIEVAL_SCORE", "0.80"))
     MIN_SCORE_MARGIN    = float(os.getenv("MIN_SCORE_MARGIN", "0.0"))
     MIN_GROUNDING       = float(os.getenv("MIN_GROUNDING_OVERLAP", "0.45"))
+    # Per-strategy corrections to MIN_RETRIEVAL_SCORE, in cosine units.
+    # Pinning a chunking strategy filters the search to one chunk type, so the
+    # best reachable chunk is no longer the best chunk in the corpus and every
+    # score shifts down. Measured on the live index, one query, three settings:
+    #     strategy=None / parent_child  top=0.9262  answered
+    #     strategy=sliding_window       top=0.8584  REFUSED
+    # Same corpus, same question, opposite verdict -- and the dropdown that
+    # causes it exists specifically to show the chunking work off. Re-measure
+    # with `python diagnose_gates.py --strategies`.
+    STRATEGY_DELTAS     = os.getenv("STRATEGY_FLOOR_DELTA", DEFAULT_STRATEGY_DELTAS)
+    # How far below the floor a query may sit and still be answered when the
+    # dense search and the BM25 search independently rank the SAME passage
+    # first. Small on purpose: real and out-of-domain score distributions
+    # overlap on this index (real p50 0.896 vs OOD p50 0.872), so a wide band
+    # would admit out-of-domain queries. 0.02 covers the measured entity-lookup
+    # refusals (0.8678-0.8732 against a 0.88 floor) and little else.
+    # Set to 0 to disable the rescue entirely.
+    SPARSE_RESCUE_DELTA = float(os.getenv("SPARSE_RESCUE_DELTA", "0.02"))
+    # Fraction of the answer's NON-question words that must appear in the
+    # retrieved context. Plain overlap counts the words an answer shares with
+    # its own question, and those are guaranteed hits -- retrieval chose the
+    # passages because they matched them -- so they outvote the words carrying
+    # the actual claim. Measured: "दिल्ली भारत की राजधानी है।" against passages
+    # about Hyderabad and Chandigarh scored 0.75 and was shown to the user,
+    # with दिल्ली the only unsupported word in it. 0 disables the check.
+    MIN_NOVEL_GROUNDING = float(os.getenv("MIN_NOVEL_GROUNDING", "0.5"))
     MAX_QUERY_CHARS     = int(os.getenv("MAX_QUERY_CHARS", "512"))
     # 128, not 48. Every chat model Groq still serves is a reasoning model,
     # and their hidden reasoning tokens are drawn from this same budget before
@@ -260,13 +287,21 @@ async def lifespan(app: FastAPI):
         state.index_error = str(e)
         logger.error(f"Retriever init failed: {e}")
 
+    strategy_deltas = parse_strategy_deltas(Limits.STRATEGY_DELTAS)
     state.guards = GuardrailPipeline(
         min_retrieval_score=Limits.MIN_RETRIEVAL_SCORE,
         min_score_margin=Limits.MIN_SCORE_MARGIN,
         min_grounding_overlap=Limits.MIN_GROUNDING,
         max_query_chars=Limits.MAX_QUERY_CHARS,
+        strategy_deltas=strategy_deltas,
+        sparse_rescue_delta=Limits.SPARSE_RESCUE_DELTA,
+        min_novel_grounding=Limits.MIN_NOVEL_GROUNDING,
     )
-    logger.info("Guardrails armed")
+    logger.info(
+        f"Guardrails armed | floor={Limits.MIN_RETRIEVAL_SCORE} "
+        f"strategy_deltas={strategy_deltas or 'none'} "
+        f"sparse_rescue={Limits.SPARSE_RESCUE_DELTA} "
+        f"novel_grounding={Limits.MIN_NOVEL_GROUNDING}")
 
     state.query_log = QueryLog()
 
@@ -384,6 +419,10 @@ async def health_check():
             "retrieval_floor": Limits.MIN_RETRIEVAL_SCORE,
             "score_margin_floor": Limits.MIN_SCORE_MARGIN,
             "grounding_floor": Limits.MIN_GROUNDING,
+            "strategy_floor_deltas": (state.guards.retrieval_gate.strategy_deltas
+                                      if state.guards else {}),
+            "sparse_rescue_delta": Limits.SPARSE_RESCUE_DELTA,
+            "novel_grounding_floor": Limits.MIN_NOVEL_GROUNDING,
         },
     }
 
@@ -531,7 +570,8 @@ async def _run_rag_pipeline_impl(
 
     with prof.stage("guard_retrieval"):
         v_ret = state.guards.check_retrieval(
-            [h.raw_score for h in rr.hits], margin=rr.score_margin)
+            [h.raw_score for h in rr.hits], margin=rr.score_margin,
+            strategy=rr.strategy_filter, lexical_agreement=rr.lexical_agreement)
     if not v_ret.allowed:
         logger.info(f"[REFUSED:{v_ret.reason.value}] {query!r} — {v_ret.detail}")
         return _refusal_response(query, v_ret, _breakdown_from(prof),
@@ -579,7 +619,7 @@ async def _run_rag_pipeline_impl(
     grounding_passed = True
     if not degraded:
         with prof.stage("guard_answer"):
-            v_ans = state.guards.check_answer(answer, context)
+            v_ans = state.guards.check_answer(answer, context, query=query)
         grounding_score = v_ans.score
         if not v_ans.allowed:
             grounding_passed = False
@@ -699,7 +739,8 @@ async def _run_rag_pipeline_streaming_impl(
 
     with prof.stage("guard_retrieval"):
         v_ret = state.guards.check_retrieval(
-            [h.raw_score for h in rr.hits], margin=rr.score_margin)
+            [h.raw_score for h in rr.hits], margin=rr.score_margin,
+            strategy=rr.strategy_filter, lexical_agreement=rr.lexical_agreement)
     if not v_ret.allowed:
         logger.info(f"[REFUSED:{v_ret.reason.value}] {query!r} — {v_ret.detail}")
         yield {"type": "refused",
@@ -791,7 +832,7 @@ async def _run_rag_pipeline_streaming_impl(
     grounding_detail = None
     if not degraded and answer:
         with prof.stage("guard_answer"):
-            v_ans = state.guards.check_answer(answer, context)
+            v_ans = state.guards.check_answer(answer, context, query=query)
         grounding_score = v_ans.score
         grounding_passed = v_ans.allowed
         grounding_detail = v_ans.detail

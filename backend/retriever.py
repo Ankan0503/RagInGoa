@@ -110,6 +110,14 @@ class RetrievalResult(BaseModel):
     mode: str = "legacy"
     transport: str = "local"
     cache_hit: bool = False
+    strategy_filter: Optional[str] = Field(
+        None, description="Canonical chunk strategy the search was filtered to, None if unfiltered")
+    top_sparse_score: float = Field(0.0, description="Best BM25 score over all candidate passages")
+    lexical_agreement: bool = Field(
+        False,
+        description="True when the dense search and the BM25 search independently "
+                    "ranked the same passage first. Scale-free evidence that the "
+                    "top passage is lexically as well as semantically right.")
     stage_timings: List[Dict[str, Any]] = Field(default_factory=list, description="Per-stage latency")
 
 
@@ -145,6 +153,31 @@ _COMPILED_PHONETIC = [
     (re.compile(_L + p + _R, re.IGNORECASE), r) for p, r in PHONETIC_PATTERNS
 ]
 _WS = re.compile(r'\s+')
+
+
+# Labels the UI may send that mean "do not filter at all". "Best Match" is the
+# dropdown's default; the others are defensive.
+_UNFILTERED_LABELS = frozenset({"", "all", "none", "best match", "best_match", "best-match"})
+
+
+def canonical_strategy(strategy: Optional[str]) -> Optional[str]:
+    """Map a user-facing strategy label onto the `strategy` payload value used
+    in the index, or None when the search should not be filtered at all.
+
+    This is the single source of truth for that mapping. The guardrail layer
+    needs the same answer -- its per-strategy score floors are keyed on these
+    canonical names -- and a second copy of this logic would drift.
+    """
+    key = (strategy or "").lower().strip()
+    if key in _UNFILTERED_LABELS:
+        return None
+    if "parent" in key or "sentence" in key:
+        return "sentence"
+    if "window" in key or "sliding" in key:
+        return "window"
+    if "semantic" in key:
+        return "semantic"
+    return "passage"
 
 
 def normalize_query_text(query: str) -> str:
@@ -445,10 +478,11 @@ class IndicRetriever:
         embed_ms = (time.perf_counter() - t0) * 1000
 
         conditions = []
-        if strategy and strategy.lower() not in ("all", "none", "", "best match"):
+        strategy_filter = canonical_strategy(strategy)
+        if strategy_filter:
             conditions.append(self._models.FieldCondition(
                 key="strategy",
-                match=self._models.MatchValue(value=self._canonical_strategy(strategy))))
+                match=self._models.MatchValue(value=strategy_filter)))
         if query_type:
             conditions.append(self._models.FieldCondition(
                 key="query_type",
@@ -572,6 +606,34 @@ class IndicRetriever:
         score_margin = round(max(0.0, top_raw - mean_rest), 4)
         margin_candidates = len(all_raw)
 
+        # Do the two retrievers independently agree on which passage is best?
+        #
+        # The retrieval guardrail can only see raw_score, which is dense-only
+        # (dense cosine and BM25 are not on a common scale, so they are kept
+        # apart on purpose). That left BM25 unable to vouch for anything, and
+        # the queries it is best at -- names, product codes, port numbers --
+        # were the ones being falsely refused. This flag is the missing signal
+        # in a form the gate can actually use: it is an agreement, not a score,
+        # so it needs no normalisation and no BM25 threshold to tune.
+        #
+        # Computed over ALL fused candidates, not the top_k slice, so a
+        # disagreement outside the returned window still counts as a
+        # disagreement. Two argmaxes over <=32 entries: no measurable cost.
+        #
+        # Under SPARSE_MODE=auto there are no sparse_points when dense was
+        # already confident, so this reports False. That is correct rather than
+        # unfortunate: those queries are above the floor and have nothing to be
+        # rescued from. The flag only ever needs to be right in the band just
+        # below the floor, and sparse always runs there.
+        top_sparse_score = 0.0
+        lexical_agreement = False
+        if parents and sparse_points:
+            dense_best = max(parents.items(), key=lambda kv: kv[1]["raw"])
+            sparse_best = max(parents.items(), key=lambda kv: kv[1]["sparse"])
+            top_sparse_score = sparse_best[1]["sparse"]
+            lexical_agreement = (top_sparse_score > 0.0
+                                 and dense_best[0] == sparse_best[0])
+
         ordered = sorted(parents.items(), key=lambda kv: kv[1]["score"], reverse=True)[:top_k]
         prof_fusion.__exit__(None, None, None)
         fusion_ms = (time.perf_counter() - t0) * 1000
@@ -620,6 +682,9 @@ class IndicRetriever:
             top_score=round(max((h.raw_score for h in hits), default=0.0), 4),
             score_margin=score_margin,
             margin_candidates=margin_candidates,
+            strategy_filter=strategy_filter,
+            top_sparse_score=round(top_sparse_score, 4),
+            lexical_agreement=lexical_agreement,
             embed_latency_ms=round(embed_ms, 2),
             search_latency_ms=round(search_ms, 2),
             fusion_latency_ms=round(fusion_ms, 2),
@@ -630,17 +695,6 @@ class IndicRetriever:
             cache_hit=cache_hit,
             stage_timings=[st.to_dict() for st in prof.stages],
         )
-
-    @staticmethod
-    def _canonical_strategy(s: str) -> str:
-        s = s.lower()
-        if "parent" in s or "sentence" in s:
-            return "sentence"
-        if "window" in s or "sliding" in s:
-            return "window"
-        if "semantic" in s:
-            return "semantic"
-        return "passage"
 
 
 if __name__ == "__main__":

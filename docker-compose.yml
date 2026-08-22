@@ -176,7 +176,42 @@ services:
       # until calibrated. Calibrate with calibrate_threshold.py before raising it.
       MIN_SCORE_MARGIN: ${MIN_SCORE_MARGIN:-0.0}
       MIN_GROUNDING_OVERLAP: ${MIN_GROUNDING_OVERLAP:-0.45}
-      MAX_TOKENS: ${MAX_TOKENS:-48}
+
+      # Per-strategy corrections to MIN_RETRIEVAL_SCORE, in cosine units.
+      # Choosing a chunking strategy in the UI filters the search to one chunk
+      # type, which lowers every score, so one absolute floor made the same
+      # question answerable under "Parent-Child" and refused under "Sliding
+      # Window" (measured: 0.9262 vs 0.8584 for कॉर्पोरेशन क्या है?).
+      # window is measured; semantic/passage are provisional -- the UI does not
+      # expose them yet. Re-measure with `python diagnose_gates.py --strategies`.
+      STRATEGY_FLOOR_DELTA: ${STRATEGY_FLOOR_DELTA:-window=-0.07,semantic=-0.05,passage=-0.03}
+
+      # How far below the floor a query may still be answered when the dense
+      # search and the BM25 search independently rank the same passage first.
+      # The retrieval gate reads a dense-only score, so before this a perfect
+      # lexical match could not rescue anything, and the false refusals were
+      # mostly entity lookups -- exactly what BM25 is here for. Deliberately a
+      # narrow band: real and out-of-domain scores overlap on this index.
+      # 0 disables the rescue.
+      SPARSE_RESCUE_DELTA: ${SPARSE_RESCUE_DELTA:-0.02}
+
+      # Fraction of the answer's NON-question words that must appear in the
+      # retrieved context. Plain overlap counts the words an answer shares with
+      # its own question, but those are guaranteed hits -- retrieval chose the
+      # passages because they matched them -- so they outvote the words that
+      # carry the actual claim. Measured: "दिल्ली भारत की राजधानी है।" against
+      # passages about Hyderabad and Chandigarh scored 0.75 and was shown to
+      # the user, with दिल्ली the only unsupported word in the sentence.
+      # Costs 5 microseconds. 0 disables the check.
+      MIN_NOVEL_GROUNDING: ${MIN_NOVEL_GROUNDING:-0.5}
+
+      # 128, not 48. Every chat model Groq still serves is a reasoning model
+      # and its hidden reasoning tokens come out of this same budget before any
+      # visible character: at 48 the budget was spent on reasoning every time,
+      # finish_reason="length" with content="", so EVERY answer came back
+      # empty. This is a cap, not a target -- measured at 96/128/160 the same
+      # answers stop on their own at <=95 tokens -- so raising it costs nothing.
+      MAX_TOKENS: ${MAX_TOKENS:-128}
       LLM_ATTEMPTS: ${LLM_ATTEMPTS:-3}
       LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-6.0}
 

@@ -66,17 +66,25 @@ if sys.platform == "win32":
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 
-def load_positives(n: int) -> List[str]:
+def load_positives(n: int, seed: int = 42) -> List[str]:
+    """Deterministic sample of real in-corpus queries.
+
+    This used to be "ORDER BY RANDOM() LIMIT ?". SQLite seeds that itself, so
+    --seed did nothing and every run calibrated against a different query set
+    -- which is how two runs of one unchanged config produced recall 0.264 and
+    0.365 in benchmark.py before the same bug was fixed there. A calibration
+    you cannot reproduce is not a calibration, so order by a stable key and do
+    the sampling in Python under the seed.
+    """
     db = os.path.join(BASE, "parents.sqlite")
     if not os.path.exists(db):
         sys.exit(f"parents.sqlite not found at {db}.")
     conn = sqlite3.connect(db)
-    rows = conn.execute(
+    rows = [r[0] for r in conn.execute(
         "SELECT DISTINCT query FROM parents WHERE query IS NOT NULL "
-        "AND length(query) > 8 ORDER BY RANDOM() LIMIT ?", (n,)
-    ).fetchall()
+        "AND length(query) > 8 ORDER BY query").fetchall()]
     conn.close()
-    return [r[0] for r in rows]
+    return rows if len(rows) <= n else random.Random(seed).sample(rows, n)
 
 
 OOD_QUERIES = [
@@ -253,7 +261,7 @@ def main():
 
     current_score = float(os.getenv("MIN_RETRIEVAL_SCORE", "0.80"))
     current_margin = float(os.getenv("MIN_SCORE_MARGIN", "0.0"))
-    positives = load_positives(args.num_positives)
+    positives = load_positives(args.num_positives, seed=args.seed)
     negatives = OOD_QUERIES + NONSENSE
 
     print(f"\nScoring {len(positives)} real queries...")
